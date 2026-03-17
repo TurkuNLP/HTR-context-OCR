@@ -1,33 +1,22 @@
-import html,math,pickle,re
+import argparse
+import html
+import math
+import pickle
+import re
+from pathlib import Path
+
 import matplotlib.pyplot as plt
 import numpy as np
 
-from pathlib import Path
-from IPython.display import HTML, display
 from matplotlib.transforms import Bbox
 from skimage.transform import probabilistic_hough_line
 
-# --------------------------
-# Paths and output folders
-# --------------------------
-IMG_DIR = Path("/scratch/project_2017385/dorian/churro_finnish_dataset/dataset_splits/dev/")
-PROJECT_ROOT = Path("/scratch/project_2017385/dorian/Churro_copy")
-SCORES_PKL = PROJECT_ROOT / "results/custom_churro_infer_dev_run1/vllm/dev/scores.pkl"
-
-# All-cases output folder
-RESULTS_DIR = PROJECT_ROOT / "results/visualise_dorian_dense_matrices_style_no_angle_all"
-FULL_DIR = RESULTS_DIR / "full_figures"
-GRAPH_DIR = RESULTS_DIR / "graph_only"
-MASK_DIR = RESULTS_DIR / "detection_masks"
-
-for out_dir in (FULL_DIR, GRAPH_DIR, MASK_DIR):
-    out_dir.mkdir(parents=True, exist_ok=True)
-
-# Set integer to limit runs, keep None for all.
-MAX_ITEMS = None
-
-# Controls whether notebook text panes are rendered.
-RENDER_NOTEBOOK_OUTPUT = True
+try:
+    from IPython.display import HTML as IPyHTML
+    from IPython.display import display as ipy_display
+except Exception:  # pragma: no cover
+    IPyHTML = None
+    ipy_display = None
 
 
 # --------------------------
@@ -193,7 +182,12 @@ def merging_diag(lines, mask, points_glo):
         bridge_support, bridge_gap = bridge_stats(pa, pb, mask)
 
         # Require close endpoints, consistent angle, and supported bridge.
-        if endpoint_dist <= merge_dist and ang_diff <= 12.0 and bridge_support >= 0.60 and bridge_gap <= 0.20:
+        if (
+            endpoint_dist <= merge_dist
+            and ang_diff <= 12.0
+            and bridge_support >= 0.60
+            and bridge_gap <= 0.20
+        ):
             points = [(p1, p2), (p1, p4), (p3, p2), (p3, p4)]
             mer = ((0, 0), (0, 0))
             max_p = 0
@@ -213,9 +207,7 @@ def merging_diag(lines, mask, points_glo):
 # Dense-matrices style detection (no angle filter)
 # --------------------------
 def detect_lines_dense_style_no_angle(matrix):
-    """
-    Same as dense_matrices.ipynb logic, but WITHOUT angle filtering.
-    """
+    """Same as dense_matrices.ipynb logic, but WITHOUT angle filtering."""
     norm = normalize_for_dense_style(matrix)
     test = 1.0 / (1.0 - norm)
 
@@ -237,7 +229,7 @@ def detect_lines_dense_style_no_angle(matrix):
     points_glo = [(int(x), int(y)) for y, x in zip(ys, xs)]
 
     # Probabilistic Hough on thresholded image.
-    lines = probabilistic_hough_line(test2, threshold=16, line_length=2, line_gap=2)
+    lines = probabilistic_hough_line(test2, threshold=26, line_length=10, line_gap=15)
 
     # No angle filtering here.
     res_lines = list(lines)
@@ -253,30 +245,83 @@ def detect_lines_dense_style_no_angle(matrix):
     }
 
 
+def parse_args():
+    script_dir = Path(__file__).resolve().parent
+    p = argparse.ArgumentParser(
+        description="Visualise chrF score matrices with dense-matrices style line detection (no angle filter).",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    p.add_argument(
+        "--img-dir",
+        type=Path,
+        default=Path("../../dorian/churro_finnish_dataset/dataset_splits/dev/"),
+        help="Directory containing document images. Files are looked up by the `fname` stored in scores.pkl.",
+    )
+    p.add_argument(
+        "--scores-pkl",
+        type=Path,
+        default=script_dir / "results/custom_churro_infer_dev_run1/vllm/dev/scores.pkl",
+        help="Path to the progressively-pickled score matrices (compare.py output).",
+    )
+    p.add_argument(
+        "--results-dir",
+        type=Path,
+        default=script_dir / "results/visualise_dorian_dense_matrices_style_no_angle_all",
+        help="Output directory. Subfolders will be created under this path.",
+    )
+    p.add_argument(
+        "--max-items",
+        type=int,
+        default=None,
+        help="Limit the number of loaded items (None means all).",
+    )
+    p.add_argument(
+        "--render-notebook-output",
+        action="store_true",
+        help="Render predicted/reference text panes using IPython.display (ignored if IPython is unavailable).",
+    )
+    p.add_argument(
+        "--show",
+        action="store_true",
+        help="Call plt.show() per item (useful in notebooks; typically disabled for batch runs).",
+    )
+    return p.parse_args()
+
+
 def main():
-    # --------------------------
-    # Main execution (all cases)
-    # --------------------------
-    if not SCORES_PKL.exists():
-        raise FileNotFoundError(f"Missing scores file: {SCORES_PKL}")
+    args = parse_args()
+
+    img_dir = args.img_dir
+    scores_pkl = args.scores_pkl
+
+    results_dir = args.results_dir
+    full_dir = results_dir / "full_figures"
+    graph_dir = results_dir / "graph_only"
+    mask_dir = results_dir / "detection_masks"
+
+    for out_dir in (full_dir, graph_dir, mask_dir):
+        out_dir.mkdir(parents=True, exist_ok=True)
+
+    if not scores_pkl.exists():
+        raise FileNotFoundError(f"Missing scores file: {scores_pkl}")
 
     saved_idx = 0
     seen = 0
 
-    with open(SCORES_PKL, "rb") as f:
+    with open(scores_pkl, "rb") as f:
         while True:
             try:
                 item = pickle.load(f)
             except EOFError:
                 break
 
-            if MAX_ITEMS is not None and seen >= MAX_ITEMS:
+            if args.max_items is not None and seen >= args.max_items:
                 break
             seen += 1
 
             fig, (ax_img, ax_hm) = plt.subplots(1, 2, figsize=(12, 5))
 
-            img_path = IMG_DIR / item["fname"]
+            img_path = img_dir / item["fname"]
             if img_path.exists():
                 ax_img.imshow(plt.imread(img_path))
                 ax_img.set_title(item["fname"])
@@ -303,9 +348,9 @@ def main():
             plt.tight_layout()
 
             base_name = safe_name(item["fname"])
-            full_out = FULL_DIR / f"{saved_idx:04d}_{base_name}_full.png"
-            graph_out = GRAPH_DIR / f"{saved_idx:04d}_{base_name}_graph.png"
-            mask_out = MASK_DIR / f"{saved_idx:04d}_{base_name}_mask.png"
+            full_out = full_dir / f"{saved_idx:04d}_{base_name}_full.png"
+            graph_out = graph_dir / f"{saved_idx:04d}_{base_name}_graph.png"
+            mask_out = mask_dir / f"{saved_idx:04d}_{base_name}_mask.png"
 
             fig.savefig(full_out, dpi=220, bbox_inches="tight", facecolor="white")
 
@@ -322,31 +367,37 @@ def main():
             print(f"Saved: {graph_out}")
             print(f"Saved: {mask_out}")
 
-            plt.show()
+            if args.show:
+                plt.show()
+            plt.close(fig)
             saved_idx += 1
 
-            if RENDER_NOTEBOOK_OUTPUT:
+            if args.render_notebook_output and IPyHTML is not None and ipy_display is not None:
                 pred_esc = html.escape(item["pred"])
                 ref_esc = html.escape(item["ref"])
-                display(
-                    HTML(
+                ipy_display(
+                    IPyHTML(
                         f"""
-        <div style="margin-top: 10px; display: flex; gap: 16px;">
-            <div style="flex: 1;">
+        <div style=\"margin-top: 10px; display: flex; gap: 16px;\">
+            <div style=\"flex: 1;\">
                 <div><strong>Predicted:</strong></div>
-                <div style="height: 300px; resize: vertical; overflow-y: auto; border: 1px solid #ccc; padding: 8px; font-family: monospace; white-space: pre-wrap;">{pred_esc}</div>
+                <div style=\"height: 300px; resize: vertical; overflow-y: auto; border: 1px solid #ccc; padding: 8px; font-family: monospace; white-space: pre-wrap;\">{pred_esc}</div>
             </div>
-            <div style="flex: 1;">
+            <div style=\"flex: 1;\">
                 <div><strong>Reference:</strong></div>
-                <div style="height: 300px; resize: vertical; overflow-y: auto; border: 1px solid #ccc; padding: 8px; font-family: monospace; white-space: pre-wrap;">{ref_esc}</div>
+                <div style=\"height: 300px; resize: vertical; overflow-y: auto; border: 1px solid #ccc; padding: 8px; font-family: monospace; white-space: pre-wrap;\">{ref_esc}</div>
             </div>
         </div>
         """
                     )
                 )
-                display(HTML('<hr style="margin: 32px 0; border: none; border-top: 2px solid #999;">'))
+                ipy_display(
+                    IPyHTML(
+                        '<hr style="margin: 32px 0; border: none; border-top: 2px solid #999;">'
+                    )
+                )
 
-    print(f"Done. Saved {saved_idx} items to: {RESULTS_DIR}")
+    print(f"Done. Saved {saved_idx} items to: {results_dir}")
 
 
 if __name__ == "__main__":

@@ -2,7 +2,7 @@
 #SBATCH --job-name=compare_churro_job
 #SBATCH --account=project_2000539
 #SBATCH --partition=small
-#SBATCH --time=02:00:00
+#SBATCH --time=08:30:00
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=8

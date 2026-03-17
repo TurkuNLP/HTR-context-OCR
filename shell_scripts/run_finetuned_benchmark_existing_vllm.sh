@@ -13,9 +13,13 @@
 #SBATCH -e logs/test_%j.err
 set -euo pipefail
 
-# Ensure module imports and relative paths work even when the script is launched
-# from a different current working directory (non-SLURM/manual runs).
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Under Slurm, BASH_SOURCE often points at a copied spool script; keep scheduler chdir/PWD.
+# Outside Slurm, resolve the script location so manual runs from other cwd still work.
+if [[ -n "${SLURM_JOB_ID:-}" ]]; then
+  SCRIPT_DIR="$(pwd)"
+else
+  SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+fi
 cd "${SCRIPT_DIR}"
 
 
