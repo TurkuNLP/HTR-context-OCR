@@ -1,6 +1,4 @@
-import argparse
-import math
-import pickle
+import argparse, math, pickle
 from pathlib import Path
 
 import numpy as np
@@ -19,6 +17,15 @@ This is a pipeline-friendly extractor that:
 The detector logic/thresholds are intentionally kept identical to
 `visualise_dorian_dense_matrices_style_single_no_angle.py`.
 """
+
+
+# Fixed diagonal theta range used by downstream alignment scripts.
+# In Hough space this is the normal angle (not line direction angle).
+DIAGONAL_THETA_DEG = np.r_[
+    np.arange(-65, -10 + 0.5, 0.5),
+    np.arange(10, 65 + 0.5, 0.5),
+]
+DIAGONAL_THETA_RAD = np.deg2rad(DIAGONAL_THETA_DEG)
 
 
 def safe_matrix(scores) -> np.ndarray:
@@ -183,12 +190,21 @@ def merging_diag(lines, mask, points_glo):
     return res
 
 
-def detect_lines_dense_style_no_angle(matrix):
-    """Dense-matrices style detector (no angle filter)."""
+def detect_lines_dense_style(
+    matrix,
+    *,
+    threshold: int = 26,
+    line_length: int = 10,
+    line_gap: int = 15,
+    theta=None,
+    rng=None,
+    start_init: float = 2.6,
+):
+    """Dense-matrices style detector with configurable Hough settings."""
     norm = normalize_for_dense_style(matrix)
     test = 1.0 / (1.0 - norm)
 
-    start = 2.6
+    start = float(start_init)
     enough = False
     criteria = 1.4 * matrix.shape[0]
 
@@ -204,7 +220,14 @@ def detect_lines_dense_style_no_angle(matrix):
     ys, xs = np.nonzero(test2)
     points_glo = [(int(x), int(y)) for y, x in zip(ys, xs)]
 
-    lines = probabilistic_hough_line(test2, threshold=26, line_length=10, line_gap=15)
+    lines = probabilistic_hough_line(
+        test2,
+        threshold=int(threshold),
+        line_length=int(line_length),
+        line_gap=int(line_gap),
+        theta=theta,
+        rng=rng,
+    )
     res_lines = list(lines)
     merged = merging_diag(res_lines, test2 > 0, points_glo)
 
@@ -215,6 +238,32 @@ def detect_lines_dense_style_no_angle(matrix):
         "selected_lines": res_lines,
         "merged_lines": merged,
     }
+
+
+def detect_lines_dense_style_no_angle(matrix, *, start_init: float = 2.6):
+    """Dense-matrices style detector (no angle filter)."""
+    return detect_lines_dense_style(matrix, start_init=start_init)
+
+
+def detect_lines_dense_style_diagonal_fixed_theta(
+    matrix,
+    *,
+    seed: int,
+    threshold: int = 26,
+    line_length: int = 10,
+    line_gap: int = 15,
+    start_init: float = 2.6,
+):
+    """Dense detector with fixed diagonal theta bands and seeded RNG."""
+    return detect_lines_dense_style(
+        matrix,
+        threshold=threshold,
+        line_length=line_length,
+        line_gap=line_gap,
+        theta=DIAGONAL_THETA_RAD,
+        rng=np.random.default_rng(int(seed)),
+        start_init=start_init,
+    )
 
 
 def parse_args():
@@ -243,6 +292,12 @@ def parse_args():
         default=None,
         help="Limit the number of processed items (None means all).",
     )
+    p.add_argument(
+        "--start-init",
+        type=float,
+        default=2.6,
+        help="Initial adaptive threshold start value before decrementing by 0.2.",
+    )
     return p.parse_args()
 
 
@@ -270,7 +325,7 @@ def main():
                 fname = f"item_{written:04d}"
 
             matrix = safe_matrix(item.get("scores"))
-            det = detect_lines_dense_style_no_angle(matrix)
+            det = detect_lines_dense_style_no_angle(matrix, start_init=float(args.start_init))
 
             rec = {
                 "index": written,
