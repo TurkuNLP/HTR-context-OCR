@@ -149,6 +149,138 @@ def mean_line_support(matrix: np.ndarray, line: dict) -> float:
     return float(np.mean(vals)) if vals else 0.0
 
 
+def _line_x_bounds(line: dict, n_pred: int):
+    if n_pred <= 0:
+        return None
+    x_min = max(0, int(math.floor(min(line["x0"], line["x1"]))))
+    x_max = min(n_pred - 1, int(math.ceil(max(line["x0"], line["x1"]))))
+    if x_max < x_min:
+        return None
+    return x_min, x_max
+
+
+def _mask_hit_at_x(mask_bool: np.ndarray, x: int, y_idx: int, radius: int) -> bool:
+    if mask_bool.size == 0:
+        return False
+
+    n_ref, n_pred = mask_bool.shape
+    if x < 0 or x >= n_pred:
+        return False
+
+    rad = max(0, int(radius))
+    y0 = max(0, int(y_idx) - rad)
+    y1 = min(n_ref - 1, int(y_idx) + rad)
+    return bool(np.any(mask_bool[y0 : y1 + 1, x]))
+
+
+def _candidate_line_key(line: dict, *, local_score: float, y_idx: int, mask_hit: bool, lid: int):
+    return (
+        int(mask_hit),
+        float(local_score),
+        float(line.get("support", 0.0)),
+        float(line.get("score", 0.0)),
+        -float(y_idx),
+        float(line.get("length", 0.0)),
+        -float(lid),
+    )
+
+
+def _compute_line_ownership(
+    lines: list[dict],
+    matrix: np.ndarray,
+    mask_bool: np.ndarray,
+    *,
+    mask_radius: int = 1,
+) -> dict:
+    n_ref, n_pred = matrix.shape
+    mapped_y = np.full(n_pred, np.nan, dtype=float)
+    mapped_line_id = np.full(n_pred, -1, dtype=int)
+
+    bounds = [_line_x_bounds(ln, n_pred) for ln in lines]
+    stats = []
+    for lid, ln in enumerate(lines):
+        bound = bounds[lid]
+        span_cols = 0 if bound is None else (bound[1] - bound[0] + 1)
+        stats.append(
+            {
+                "x_start": None if bound is None else int(bound[0]),
+                "x_end": None if bound is None else int(bound[1]),
+                "span_cols": int(max(span_cols, 0)),
+                "owned_x": [],
+                "owned_y": [],
+                "owned_scores": [],
+                "owned_mask_hits": 0,
+                "anchor_y": float(min(ln["y0"], ln["y1"])),
+            }
+        )
+
+    for x in range(n_pred):
+        best = None
+        best_key = None
+
+        for lid, ln in enumerate(lines):
+            bound = bounds[lid]
+            if bound is None or x < bound[0] or x > bound[1]:
+                continue
+
+            y_est = line_y_at_x(ln, x)
+            y_idx = int(np.clip(round(y_est), 0, n_ref - 1))
+            local_score = float(matrix[y_idx, x])
+            mask_hit = _mask_hit_at_x(mask_bool, x, y_idx, mask_radius)
+            key = _candidate_line_key(ln, local_score=local_score, y_idx=y_idx, mask_hit=mask_hit, lid=lid)
+
+            if best_key is None or key > best_key:
+                best_key = key
+                best = (lid, y_idx, local_score, mask_hit)
+
+        if best is None:
+            continue
+
+        lid, y_idx, local_score, mask_hit = best
+        if not mask_hit:
+            continue
+
+        mapped_y[x] = float(y_idx)
+        mapped_line_id[x] = int(lid)
+        stats[lid]["owned_x"].append(int(x))
+        stats[lid]["owned_y"].append(int(y_idx))
+        stats[lid]["owned_scores"].append(float(local_score))
+        stats[lid]["owned_mask_hits"] += int(mask_hit)
+
+    for stat in stats:
+        owned_cols = len(stat["owned_x"])
+        span_cols = int(stat["span_cols"])
+        stat["owned_cols"] = int(owned_cols)
+        stat["owned_fraction"] = float(owned_cols / span_cols) if span_cols > 0 else 0.0
+        stat["owned_score_mean"] = float(np.mean(stat["owned_scores"])) if stat["owned_scores"] else 0.0
+        stat["owned_mask_fraction"] = (
+            float(stat["owned_mask_hits"] / owned_cols) if owned_cols > 0 else 0.0
+        )
+        if stat["owned_y"]:
+            stat["anchor_y"] = float(np.median(stat["owned_y"]))
+
+    return {
+        "mapped_y": mapped_y,
+        "mapped_line_id": mapped_line_id,
+        "stats": stats,
+    }
+
+
+def _decorate_lines_with_ownership(lines: list[dict], stats: list[dict]) -> list[dict]:
+    out = []
+    for lid, ln in enumerate(lines):
+        stat = stats[lid]
+        ln2 = dict(ln)
+        ln2["owned_cols"] = int(stat.get("owned_cols", 0))
+        ln2["owned_fraction"] = float(stat.get("owned_fraction", 0.0))
+        ln2["owned_score_mean"] = float(stat.get("owned_score_mean", 0.0))
+        ln2["owned_mask_hits"] = int(stat.get("owned_mask_hits", 0))
+        ln2["owned_mask_fraction"] = float(stat.get("owned_mask_fraction", 0.0))
+        ln2["anchor_y"] = float(stat.get("anchor_y", min(ln2["y0"], ln2["y1"])))
+        out.append(ln2)
+    return out
+
+
 def lines_from_merged_segments(matrix: np.ndarray, merged_lines) -> list[dict]:
     lines: list[dict] = []
     for p0, p1 in merged_lines:
@@ -169,13 +301,18 @@ def lines_from_merged_segments(matrix: np.ndarray, merged_lines) -> list[dict]:
     return sorted(lines, key=lambda ln: (min(ln["y0"], ln["y1"]), min(ln["x0"], ln["x1"])))
 
 
-def filter_lines_for_alignment(lines: list[dict], matrix: np.ndarray) -> list[dict]:
+def filter_lines_for_alignment(
+    lines: list[dict],
+    matrix: np.ndarray,
+    *,
+    min_len_ratio: float = 0.08,
+) -> list[dict]:
     if not lines:
         return []
 
     max_score = max(float(ln.get("score", 0.0)) for ln in lines)
     min_dim = min(matrix.shape) if matrix.size > 0 else 1
-    min_len = max(8.0, 0.08 * float(min_dim))
+    min_len = max(8.0, float(min_len_ratio) * float(min_dim))
     support_floor = float(np.percentile(matrix, 75)) if matrix.size > 0 else 0.0
 
     kept = []
@@ -200,6 +337,120 @@ def filter_lines_for_alignment(lines: list[dict], matrix: np.ndarray) -> list[di
         return [best2]
 
     return sorted(kept, key=lambda ln: (min(ln["y0"], ln["y1"]), min(ln["x0"], ln["x1"])))
+
+
+def filter_lines_for_alignment_by_ownership(
+    lines: list[dict],
+    matrix: np.ndarray,
+    mask_bool: np.ndarray,
+    *,
+    abs_min_len: float = 8.0,
+    mask_radius: int = 1,
+    min_owned_cols: int = 6,
+    min_owned_fraction: float = 0.12,
+):
+    if not lines:
+        n_pred = matrix.shape[1] if matrix.ndim == 2 else 0
+        return [], {
+            "mapped_y": np.full(n_pred, np.nan, dtype=float),
+            "mapped_line_id": np.full(n_pred, -1, dtype=int),
+        }
+
+    if matrix.size == 0:
+        n_pred = matrix.shape[1] if matrix.ndim == 2 else 0
+        return [], {
+            "mapped_y": np.full(n_pred, np.nan, dtype=float),
+            "mapped_line_id": np.full(n_pred, -1, dtype=int),
+        }
+
+    if mask_bool.shape != matrix.shape:
+        raise ValueError(
+            f"mask_bool shape {mask_bool.shape} does not match matrix shape {matrix.shape}"
+        )
+
+    max_score = max(float(ln.get("score", 0.0)) for ln in lines)
+    support_floor = float(np.percentile(matrix, 75)) if matrix.size > 0 else 0.0
+
+    candidates = []
+    for ln in lines:
+        ln2 = dict(ln)
+        ln2["length"] = line_length(ln2)
+        ln2["support"] = mean_line_support(matrix, ln2)
+
+        if ln2["length"] < float(abs_min_len):
+            continue
+        if max_score > 0 and float(ln2.get("score", 0.0)) < 0.06 * max_score:
+            continue
+        if ln2["support"] < support_floor:
+            continue
+        candidates.append(ln2)
+
+    if not candidates:
+        best = max(lines, key=lambda ln: float(ln.get("score", 0.0)))
+        best2 = dict(best)
+        best2["length"] = line_length(best2)
+        best2["support"] = mean_line_support(matrix, best2)
+        candidates = [best2]
+
+    initial_assignment = _compute_line_ownership(
+        candidates,
+        matrix,
+        mask_bool,
+        mask_radius=mask_radius,
+    )
+    initial_stats = initial_assignment["stats"]
+
+    kept = []
+    for lid, ln in enumerate(candidates):
+        stat = initial_stats[lid]
+        if (
+            int(stat.get("owned_cols", 0)) >= int(min_owned_cols)
+            and float(stat.get("owned_fraction", 0.0)) >= float(min_owned_fraction)
+        ):
+            kept.append(dict(ln))
+
+    if not kept:
+        best_lid = max(
+            range(len(candidates)),
+            key=lambda lid: (
+                int(initial_stats[lid].get("owned_cols", 0)),
+                float(initial_stats[lid].get("owned_fraction", 0.0)),
+                int(initial_stats[lid].get("owned_mask_hits", 0)),
+                float(candidates[lid].get("score", 0.0)),
+                float(candidates[lid].get("support", 0.0)),
+                float(candidates[lid].get("length", 0.0)),
+                -float(initial_stats[lid].get("anchor_y", 0.0)),
+            ),
+        )
+        kept = [dict(candidates[best_lid])]
+
+    kept = sorted(
+        kept,
+        key=lambda ln: (min(ln["y0"], ln["y1"]), min(ln["x0"], ln["x1"])),
+    )
+    final_assignment = _compute_line_ownership(
+        kept,
+        matrix,
+        mask_bool,
+        mask_radius=mask_radius,
+    )
+    kept = _decorate_lines_with_ownership(kept, final_assignment["stats"])
+    kept = sorted(
+        kept,
+        key=lambda ln: (float(ln.get("anchor_y", min(ln["y0"], ln["y1"]))), min(ln["x0"], ln["x1"])),
+    )
+    final_assignment = _compute_line_ownership(
+        kept,
+        matrix,
+        mask_bool,
+        mask_radius=mask_radius,
+    )
+    kept = _decorate_lines_with_ownership(kept, final_assignment["stats"])
+
+    return kept, {
+        "mapped_y": final_assignment["mapped_y"],
+        "mapped_line_id": final_assignment["mapped_line_id"],
+    }
 
 
 def build_pred_blocks(pred_text: str, n_pred: int, stride: int) -> list[str]:
@@ -233,6 +484,7 @@ def align_prediction(
     lines_read_order: list[dict],
     window_stride: int,
     fallback_mode: str,
+    column_assignment: dict | None = None,
 ):
     def contiguous_runs(mask: np.ndarray) -> list[tuple[int, int, bool]]:
         runs: list[tuple[int, int, bool]] = []
@@ -249,6 +501,21 @@ def align_prediction(
         runs.append((start, int(mask.size) - 1, cur))
         return runs
 
+    def contiguous_label_runs(labels: np.ndarray) -> list[tuple[int, int, int]]:
+        runs: list[tuple[int, int, int]] = []
+        if labels.size == 0:
+            return runs
+        start = 0
+        cur = int(labels[0])
+        for i in range(1, int(labels.size)):
+            v = int(labels[i])
+            if v != cur:
+                runs.append((start, i - 1, cur))
+                start = i
+                cur = v
+        runs.append((start, int(labels.size) - 1, cur))
+        return runs
+
     n_ref, n_pred = matrix.shape
     if n_pred == 0:
         return {
@@ -261,53 +528,76 @@ def align_prediction(
             "movable_components": 0,
         }
 
-    lines_sorted = sorted(lines_read_order, key=lambda ln: (min(ln["y0"], ln["y1"]), min(ln["x0"], ln["x1"])))
     mapped_y = np.full(n_pred, np.nan, dtype=float)
     mapped_line_id = np.full(n_pred, -1, dtype=int)
 
-    for x in range(n_pred):
-        best_score = float("-inf")
-        best_y_idx = -1
-        best_lid = -1
+    if column_assignment is not None:
+        pre_y = np.asarray(column_assignment.get("mapped_y", []), dtype=float)
+        pre_line_id = np.asarray(column_assignment.get("mapped_line_id", []), dtype=int)
+        if pre_y.shape != (n_pred,) or pre_line_id.shape != (n_pred,):
+            raise ValueError(
+                "column_assignment must provide mapped_y and mapped_line_id arrays with shape "
+                f"({n_pred},), got {pre_y.shape} and {pre_line_id.shape}"
+            )
+        mapped_y = pre_y.copy()
+        mapped_line_id = pre_line_id.copy()
+    else:
+        lines_sorted = sorted(lines_read_order, key=lambda ln: (min(ln["y0"], ln["y1"]), min(ln["x0"], ln["x1"])))
 
-        for lid, ln in enumerate(lines_sorted):
-            x_min = int(math.floor(min(ln["x0"], ln["x1"])))
-            x_max = int(math.ceil(max(ln["x0"], ln["x1"])))
-            if x < x_min or x > x_max:
-                continue
+        for x in range(n_pred):
+            best_score = float("-inf")
+            best_y_idx = -1
+            best_lid = -1
 
-            y_est = line_y_at_x(ln, x)
-            y_idx = int(np.clip(round(y_est), 0, n_ref - 1))
-            score = float(matrix[y_idx, x])
+            for lid, ln in enumerate(lines_sorted):
+                x_min = int(math.floor(min(ln["x0"], ln["x1"])))
+                x_max = int(math.ceil(max(ln["x0"], ln["x1"])))
+                if x < x_min or x > x_max:
+                    continue
 
-            if (
-                score > best_score
-                or (math.isclose(score, best_score) and (best_y_idx < 0 or y_idx < best_y_idx))
-                or (math.isclose(score, best_score) and y_idx == best_y_idx and (best_lid < 0 or lid < best_lid))
-            ):
-                best_score = score
-                best_y_idx = y_idx
-                best_lid = lid
+                y_est = line_y_at_x(ln, x)
+                y_idx = int(np.clip(round(y_est), 0, n_ref - 1))
+                score = float(matrix[y_idx, x])
 
-        if best_lid >= 0:
-            mapped_y[x] = float(best_y_idx)
-            mapped_line_id[x] = best_lid
-        elif fallback_mode == "argmax":
-            mapped_y[x] = float(int(np.argmax(matrix[:, x])) if n_ref > 0 else 0)
+                if (
+                    score > best_score
+                    or (math.isclose(score, best_score) and (best_y_idx < 0 or y_idx < best_y_idx))
+                    or (math.isclose(score, best_score) and y_idx == best_y_idx and (best_lid < 0 or lid < best_lid))
+                ):
+                    best_score = score
+                    best_y_idx = y_idx
+                    best_lid = lid
+
+            if best_lid >= 0:
+                mapped_y[x] = float(best_y_idx)
+                mapped_line_id[x] = best_lid
+
+    if fallback_mode == "argmax":
+        uncovered = ~np.isfinite(mapped_y)
+        if np.any(uncovered):
+            for x in np.flatnonzero(uncovered):
+                mapped_y[x] = float(int(np.argmax(matrix[:, x])) if n_ref > 0 else 0)
 
     attached_between_cols = 0
     attached_between_runs = 0
     movable_components = 0
 
     if fallback_mode == "skip":
-        guided_mask = mapped_line_id >= 0
-        runs = contiguous_runs(guided_mask)
+        use_label_runs = column_assignment is not None
+        if use_label_runs:
+            runs = contiguous_label_runs(mapped_line_id)
+        else:
+            guided_mask = mapped_line_id >= 0
+            runs = contiguous_runs(guided_mask)
 
         components: list[dict] = []
         run_to_component: dict[int, int] = {}
         fixed_cols: set[int] = set()
 
-        for ri, (a, b, is_guided) in enumerate(runs):
+        for ri, run in enumerate(runs):
+            a, b = int(run[0]), int(run[1])
+            run_label = int(run[2]) if use_label_runs else int(bool(run[2]))
+            is_guided = run_label >= 0 if use_label_runs else bool(run[2])
             if not is_guided:
                 continue
             guided_cols = list(range(a, b + 1))
@@ -320,16 +610,24 @@ def align_prediction(
                     "guided_cols": guided_cols.copy(),
                     "anchor_y": anchor_y,
                     "x_start": a,
+                    "line_id": run_label,
                 }
             )
             run_to_component[ri] = cid
 
-        for ri, (a, b, is_guided) in enumerate(runs):
+        for ri, run in enumerate(runs):
+            a, b = int(run[0]), int(run[1])
+            run_label = int(run[2]) if use_label_runs else int(bool(run[2]))
+            is_guided = run_label >= 0 if use_label_runs else bool(run[2])
             if is_guided:
                 continue
             cols = list(range(a, b + 1))
-            left_guided = ri - 1 >= 0 and runs[ri - 1][2]
-            right_guided = ri + 1 < len(runs) and runs[ri + 1][2]
+            if use_label_runs:
+                left_guided = ri - 1 >= 0 and int(runs[ri - 1][2]) >= 0
+                right_guided = ri + 1 < len(runs) and int(runs[ri + 1][2]) >= 0
+            else:
+                left_guided = ri - 1 >= 0 and bool(runs[ri - 1][2])
+                right_guided = ri + 1 < len(runs) and bool(runs[ri + 1][2])
 
             if left_guided and right_guided:
                 cid = run_to_component[ri - 1]
