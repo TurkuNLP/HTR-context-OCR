@@ -1,4 +1,6 @@
-import argparse, math, pickle
+import argparse
+import math
+import pickle
 from pathlib import Path
 
 import numpy as np
@@ -19,11 +21,14 @@ The detector logic/thresholds are intentionally kept identical to
 """
 
 
-# Fixed diagonal theta range used by downstream alignment scripts.
+# Fixed theta range used by downstream alignment scripts.
 # In Hough space this is the normal angle (not line direction angle).
+# Keeping line-direction angles in [35 deg, 90 deg) maps to normal-angle
+# bands [-55 deg, 0 deg) U (0 deg, 55 deg], which preserves both
+# diagonal slants while excluding perfectly vertical 90 deg lines.
 DIAGONAL_THETA_DEG = np.r_[
-    np.arange(-65, -10 + 0.5, 0.5),
-    np.arange(10, 65 + 0.5, 0.5),
+    np.arange(-55, 0, 0.5),
+    np.arange(0.5, 55 + 0.5, 0.5),
 ]
 DIAGONAL_THETA_RAD = np.deg2rad(DIAGONAL_THETA_DEG)
 

@@ -3,16 +3,20 @@ import numpy as np
 from line_filtering import line_length, line_y_at_x, mean_line_support
 
 DEFAULT_ABS_MIN_LEN = 6.0
+DEFAULT_MIN_IOU_THRESHOLD = 0.035
 
 __all__ = [
     "DEFAULT_ABS_MIN_LEN",
+    "DEFAULT_MIN_IOU_THRESHOLD",
+    "analyze_line_filtering",
+    "filter_lines_for_alignment",
     "filter_lines_for_alignment_by_ownership",
 ]
 
 
 # Build the empty per-column mapping used when no final guides survive.
 def _empty_assignment(n_pred: int) -> dict[str, np.ndarray]:
-    # Match the v1 return shape so downstream scripts do not need to special-case v2.
+    # Match the v1 return shape so downstream scripts do not need to special-case v2.1.
     return {
         "mapped_y": np.full(n_pred, np.nan, dtype=float),
         "mapped_line_id": np.full(n_pred, -1, dtype=int),
@@ -109,6 +113,7 @@ def _coverage_from_path(
     x_to_score: dict[int, float],
     matrix: np.ndarray,
     fallback_line: dict | None = None,
+    source_raw_line_ids: list[int] | None = None,
 ) -> dict:
     # Normalize the discrete path into sorted prediction coverage and derived reference coverage.
     pred_segments = set(int(x) for x in x_to_y)
@@ -130,6 +135,7 @@ def _coverage_from_path(
         "total_score": total_score,
         "mean_score": mean_score,
         "anchor_y": anchor_y,
+        "source_raw_line_ids": sorted(int(v) for v in (source_raw_line_ids or [])),
     }
 
 
@@ -161,17 +167,57 @@ def _build_line_coverage(line: dict, matrix: np.ndarray) -> dict | None:
         x_to_score=x_to_score,
         matrix=matrix,
         fallback_line=line,
+        source_raw_line_ids=[int(line.get("raw_line_id", -1))] if "raw_line_id" in line else [],
     )
 
 
-# Decide whether two coverages overlap on both prediction and reference text coverage.
-def _coverages_overlap(cov_a: dict, cov_b: dict) -> bool:
-    # The v2 candidate rule is simply positive overlap on both text axes.
-    shared_pred = cov_a["pred_segments"] & cov_b["pred_segments"]
-    if not shared_pred:
-        return False
-    shared_ref = cov_a["ref_segments"] & cov_b["ref_segments"]
-    return bool(shared_ref)
+# Compute the exact set IoU used by the v2.1 overlap rule.
+def _set_iou(values_a: set[int], values_b: set[int]) -> float:
+    # Two empty sets have no meaningful overlap for the merge decision.
+    union = values_a | values_b
+    if not union:
+        return 0.0
+    return float(len(values_a & values_b) / len(union))
+
+
+# Summarize the full x/y IoU relationship between two coverages.
+def _coverage_iou_stats(cov_a: dict, cov_b: dict, *, min_iou_threshold: float) -> dict:
+    pred_a = cov_a["pred_segments"]
+    pred_b = cov_b["pred_segments"]
+    ref_a = cov_a["ref_segments"]
+    ref_b = cov_b["ref_segments"]
+
+    shared_pred = pred_a & pred_b
+    shared_ref = ref_a & ref_b
+    union_pred = pred_a | pred_b
+    union_ref = ref_a | ref_b
+    x_iou = _set_iou(pred_a, pred_b)
+    y_iou = _set_iou(ref_a, ref_b)
+    min_iou = float(min(x_iou, y_iou))
+
+    # Store enough detail to explain exactly why a pair did or did not become a merge edge.
+    return {
+        "raw_line_ids_a": sorted(int(v) for v in cov_a.get("source_raw_line_ids", [])),
+        "raw_line_ids_b": sorted(int(v) for v in cov_b.get("source_raw_line_ids", [])),
+        "shared_pred_count": int(len(shared_pred)),
+        "union_pred_count": int(len(union_pred)),
+        "shared_ref_count": int(len(shared_ref)),
+        "union_ref_count": int(len(union_ref)),
+        "shared_pred_segments": [int(v) for v in sorted(shared_pred)],
+        "shared_ref_segments": [int(v) for v in sorted(shared_ref)],
+        "x_iou": float(x_iou),
+        "y_iou": float(y_iou),
+        "min_iou": min_iou,
+        "min_iou_threshold": float(min_iou_threshold),
+        "merge_candidate": bool(min_iou > float(min_iou_threshold)),
+    }
+
+
+# Decide whether two coverages overlap strongly enough under the true-IoU rule.
+def _coverages_overlap(cov_a: dict, cov_b: dict, *, min_iou_threshold: float) -> tuple[bool, dict]:
+    # A pair merges only when both x and y IoUs exist and the weaker axis still clears the threshold.
+    stats = _coverage_iou_stats(cov_a, cov_b, min_iou_threshold=min_iou_threshold)
+    return bool(stats["merge_candidate"]), stats
 
 
 # Choose which coverage contributes a given prediction segment.
@@ -213,26 +259,31 @@ def _merge_component(component_coverages: list[dict], matrix: np.ndarray) -> dic
         merged_x_to_y[int(x)] = int(best_cov["x_to_y"][x])
         merged_x_to_score[int(x)] = float(best_cov["x_to_score"][x])
 
+    source_raw_line_ids = sorted(
+        {int(raw_id) for cov in component_coverages for raw_id in cov.get("source_raw_line_ids", []) if int(raw_id) >= 0}
+    )
+
     # Recompute one representative line from the merged text coverage rather than from the raw geometry.
     return _coverage_from_path(
         x_to_y=merged_x_to_y,
         x_to_score=merged_x_to_score,
         matrix=matrix,
         fallback_line=fallback_cov["line"],
+        source_raw_line_ids=source_raw_line_ids,
     )
 
 
-# Group overlapping coverages into connected components.
-def _coverage_components(coverages: list[dict]) -> list[list[int]]:
-    # No coverages means no overlap graph either.
-    if not coverages:
+# Build connected components from an explicit adjacency graph.
+def _components_from_adjacency(adjacency: dict[int, set[int]]) -> list[list[int]]:
+    # No nodes means no components either.
+    if not adjacency:
         return []
 
     components: list[list[int]] = []
     seen: set[int] = set()
 
-    # Walk the implicit overlap graph so any transitive overlap lands in one merge component.
-    for start in range(len(coverages)):
+    # Walk the overlap graph so any transitive true-IoU edge lands in one merge component.
+    for start in sorted(adjacency):
         if start in seen:
             continue
 
@@ -243,17 +294,156 @@ def _coverage_components(coverages: list[dict]) -> list[list[int]]:
         while stack:
             idx = stack.pop()
             component.append(int(idx))
-
-            for other in range(len(coverages)):
+            for other in sorted(adjacency[idx]):
                 if other in seen:
                     continue
-                if _coverages_overlap(coverages[idx], coverages[other]):
-                    seen.add(int(other))
-                    stack.append(int(other))
+                seen.add(int(other))
+                stack.append(int(other))
 
         components.append(sorted(component))
 
     return components
+
+
+# Group overlapping coverages into connected components under the true-IoU rule.
+def _coverage_components(
+    coverages: list[dict],
+    *,
+    min_iou_threshold: float,
+) -> tuple[list[list[int]], list[dict]]:
+    # No coverages means no overlap graph either.
+    if not coverages:
+        return [], []
+
+    adjacency: dict[int, set[int]] = {idx: set() for idx in range(len(coverages))}
+    pairwise_stats: list[dict] = []
+
+    # Evaluate every pair once so we can both build components and save the exact IoU diagnostics.
+    for idx in range(len(coverages)):
+        for other in range(idx + 1, len(coverages)):
+            overlaps, stats = _coverages_overlap(
+                coverages[idx],
+                coverages[other],
+                min_iou_threshold=min_iou_threshold,
+            )
+            stats["coverage_index_a"] = int(idx)
+            stats["coverage_index_b"] = int(other)
+            pairwise_stats.append(stats)
+            if not overlaps:
+                continue
+            adjacency[idx].add(int(other))
+            adjacency[other].add(int(idx))
+
+    return _components_from_adjacency(adjacency), pairwise_stats
+
+
+# Convert one coverage object into a compact debug-friendly summary.
+def _coverage_debug_summary(cov: dict, *, coverage_index: int | None = None) -> dict:
+    line = cov["line"]
+    summary = {
+        "source_raw_line_ids": sorted(int(v) for v in cov.get("source_raw_line_ids", [])),
+        "pred_segment_count": int(len(cov.get("pred_segments", ()))),
+        "ref_segment_count": int(len(cov.get("ref_segments", ()))),
+        "total_score": float(cov.get("total_score", 0.0)),
+        "mean_score": float(cov.get("mean_score", 0.0)),
+        "anchor_y": float(cov.get("anchor_y", 0.0)),
+        "x0": float(line.get("x0", 0.0)),
+        "y0": float(line.get("y0", 0.0)),
+        "x1": float(line.get("x1", 0.0)),
+        "y1": float(line.get("y1", 0.0)),
+        "length": float(line.get("length", 0.0)),
+        "support": float(line.get("support", 0.0)),
+        "score": float(line.get("score", 0.0)),
+    }
+    if coverage_index is not None:
+        summary["coverage_index"] = int(coverage_index)
+    return summary
+
+
+# Normalize the raw Hough lines into a credible v2.1 candidate set.
+def _prepare_candidates(lines: list[dict], matrix: np.ndarray, *, abs_min_len: float) -> list[dict]:
+    # Empty inputs stay empty so the caller can keep the standard fallback behavior.
+    if not lines:
+        return []
+
+    max_score = max(float(ln.get("score", 0.0)) for ln in lines)
+    support_floor = float(np.percentile(matrix, 75)) if matrix.size > 0 else 0.0
+    candidates: list[dict] = []
+
+    for raw_line_id, ln in enumerate(lines):
+        ln2 = dict(ln)
+        # Recompute geometry and support so all candidates are judged on the same baseline.
+        ln2["raw_line_id"] = int(raw_line_id)
+        ln2["length"] = line_length(ln2)
+        ln2["support"] = mean_line_support(matrix, ln2)
+
+        # Keep only obviously credible candidates before the coverage-based merge stage.
+        if ln2["length"] < float(abs_min_len):
+            continue
+        if max_score > 0 and float(ln2.get("score", 0.0)) < 0.06 * max_score:
+            continue
+        if ln2["support"] < support_floor:
+            continue
+        candidates.append(ln2)
+
+    # Preserve the old "keep the single best raw line" fallback when everything fails the coarse gates.
+    if not candidates:
+        best_raw_line_id, best = max(
+            enumerate(lines),
+            key=lambda pair: float(pair[1].get("score", 0.0)),
+        )
+        best2 = dict(best)
+        best2["raw_line_id"] = int(best_raw_line_id)
+        best2["length"] = line_length(best2)
+        best2["support"] = mean_line_support(matrix, best2)
+        candidates = [best2]
+
+    return sorted(candidates, key=lambda ln: (min(ln["y0"], ln["y1"]), min(ln["x0"], ln["x1"])))
+
+
+# Analyze the full v2.1 filtering pipeline and expose detailed IoU/debug state.
+def analyze_line_filtering(
+    lines: list[dict],
+    matrix: np.ndarray,
+    *,
+    abs_min_len: float = DEFAULT_ABS_MIN_LEN,
+    min_iou_threshold: float = DEFAULT_MIN_IOU_THRESHOLD,
+) -> dict:
+    # Keep the analysis self-contained so callers can save a full debug bundle without duplicating logic.
+    candidates = _prepare_candidates(lines, matrix, abs_min_len=abs_min_len)
+    coverages = [cov for cov in (_build_line_coverage(ln, matrix) for ln in candidates) if cov is not None]
+    components, pairwise_iou = _coverage_components(
+        coverages,
+        min_iou_threshold=min_iou_threshold,
+    )
+    merged_coverages = [_merge_component([coverages[idx] for idx in component], matrix) for component in components]
+
+    return {
+        "candidate_lines": [dict(ln) for ln in candidates],
+        "candidate_coverages": [
+            _coverage_debug_summary(cov, coverage_index=idx) for idx, cov in enumerate(coverages)
+        ],
+        "pairwise_iou": pairwise_iou,
+        "components": [
+            {
+                "component_index": int(component_index),
+                "coverage_indices": [int(idx) for idx in component],
+                "source_raw_line_ids": sorted(
+                    {
+                        int(raw_id)
+                        for idx in component
+                        for raw_id in coverages[idx].get("source_raw_line_ids", [])
+                        if int(raw_id) >= 0
+                    }
+                ),
+            }
+            for component_index, component in enumerate(components)
+        ],
+        "merged_coverages": [
+            _coverage_debug_summary(cov, coverage_index=idx) for idx, cov in enumerate(merged_coverages)
+        ],
+        "merged_coverage_objects": merged_coverages,
+    }
 
 
 # Assign each prediction column to the strongest surviving coverage.
@@ -348,6 +538,7 @@ def _finalize_outputs(
                 if 0 <= x < mask_bool.shape[1] and 0 <= y < mask_bool.shape[0]:
                     owned_mask_hits += int(bool(mask_bool[y, x]))
 
+        line["source_raw_line_ids"] = sorted(int(v) for v in cov.get("source_raw_line_ids", []))
         line["owned_cols"] = int(len(owned_cols))
         line["owned_fraction"] = float(len(owned_cols) / span_cols)
         line["owned_score_mean"] = float(np.mean(owned_scores)) if owned_scores else 0.0
@@ -369,52 +560,39 @@ def _finalize_outputs(
     return final_lines, assignment
 
 
-# Normalize the raw Hough lines into a credible v2 candidate set.
-def _prepare_candidates(lines: list[dict], matrix: np.ndarray, *, abs_min_len: float) -> list[dict]:
-    # Empty inputs stay empty so the caller can keep the standard fallback behavior.
-    if not lines:
-        return []
-
-    max_score = max(float(ln.get("score", 0.0)) for ln in lines)
-    support_floor = float(np.percentile(matrix, 75)) if matrix.size > 0 else 0.0
-    candidates: list[dict] = []
-
-    for ln in lines:
-        ln2 = dict(ln)
-        # Recompute geometry and support so all candidates are judged on the same baseline.
-        ln2["length"] = line_length(ln2)
-        ln2["support"] = mean_line_support(matrix, ln2)
-
-        # Keep only obviously credible candidates before the coverage-based merge stage.
-        if ln2["length"] < float(abs_min_len):
-            continue
-        if max_score > 0 and float(ln2.get("score", 0.0)) < 0.06 * max_score:
-            continue
-        if ln2["support"] < support_floor:
-            continue
-        candidates.append(ln2)
-
-    # Preserve the old "keep the single best raw line" fallback when everything fails the coarse gates.
-    if not candidates:
-        best = max(lines, key=lambda ln: float(ln.get("score", 0.0)))
-        best2 = dict(best)
-        best2["length"] = line_length(best2)
-        best2["support"] = mean_line_support(matrix, best2)
-        candidates = [best2]
-
-    return sorted(candidates, key=lambda ln: (min(ln["y0"], ln["y1"]), min(ln["x0"], ln["x1"])))
+# Provide the old simple line-list API by delegating to the shared v2.1 ownership filter.
+def filter_lines_for_alignment(
+    lines: list[dict],
+    matrix: np.ndarray,
+    *,
+    abs_min_len: float = DEFAULT_ABS_MIN_LEN,
+    min_iou_threshold: float = DEFAULT_MIN_IOU_THRESHOLD,
+    **_ignored,
+) -> list[dict]:
+    # The older callers only need the final lines, not the per-column assignment arrays.
+    mask_bool = np.zeros_like(matrix, dtype=bool) if matrix.ndim == 2 else np.zeros((0, 0), dtype=bool)
+    final_lines, _ = filter_lines_for_alignment_by_ownership(
+        lines,
+        matrix,
+        mask_bool,
+        abs_min_len=abs_min_len,
+        min_iou_threshold=min_iou_threshold,
+        **_ignored,
+    )
+    return final_lines
 
 
-# Filter lines using coverage overlap on prediction/reference segments rather than v1 ownership geometry.
+# Filter lines using true IoU over prediction/reference coverage rather than the v1 ownership geometry.
 def filter_lines_for_alignment_by_ownership(
     lines: list[dict],
     matrix: np.ndarray,
     mask_bool: np.ndarray,
     *,
     abs_min_len: float = DEFAULT_ABS_MIN_LEN,
+    min_iou_threshold: float = DEFAULT_MIN_IOU_THRESHOLD,
     **_ignored,
 ):
-    # Keep only the minimum public surface needed by v2 while still accepting old v1-style keyword calls.
+    # Keep the minimum public surface needed by v2.1 while still accepting old v1-style keyword calls.
     if not lines:
         n_pred = matrix.shape[1] if matrix.ndim == 2 else 0
         return [], _empty_assignment(n_pred)
@@ -423,17 +601,14 @@ def filter_lines_for_alignment_by_ownership(
         n_pred = matrix.shape[1] if matrix.ndim == 2 else 0
         return [], _empty_assignment(n_pred)
 
-    # Preserve the same shape check as v1 even though v2 uses the mask only for output statistics.
+    # Preserve the same shape check as v1 even though v2.1 uses the mask only for output statistics.
     if mask_bool.shape != matrix.shape:
         raise ValueError(f"mask_bool shape {mask_bool.shape} does not match matrix shape {matrix.shape}")
 
-    candidates = _prepare_candidates(lines, matrix, abs_min_len=abs_min_len)
-    coverages = [cov for cov in (_build_line_coverage(ln, matrix) for ln in candidates) if cov is not None]
-    if not coverages:
-        n_pred = matrix.shape[1] if matrix.ndim == 2 else 0
-        return [], _empty_assignment(n_pred)
-
-    # Merge all raw lines that belong to the same text-coverage component.
-    components = _coverage_components(coverages)
-    merged_coverages = [_merge_component([coverages[idx] for idx in component], matrix) for component in components]
-    return _finalize_outputs(merged_coverages, matrix, mask_bool)
+    analysis = analyze_line_filtering(
+        lines,
+        matrix,
+        abs_min_len=abs_min_len,
+        min_iou_threshold=min_iou_threshold,
+    )
+    return _finalize_outputs(list(analysis["merged_coverage_objects"]), matrix, mask_bool)

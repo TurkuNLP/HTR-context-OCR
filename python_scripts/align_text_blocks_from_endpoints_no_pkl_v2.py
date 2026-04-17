@@ -1,13 +1,7 @@
-import argparse
-import json
-import math
-import re
-import sys
+import argparse, json, math, re, sys,numpy as np, sacrebleu
 from collections import Counter
 from pathlib import Path
 
-import numpy as np
-import sacrebleu
 
 _SCRIPT_DIR = Path(__file__).resolve().parent
 if str(_SCRIPT_DIR) not in sys.path:
@@ -16,13 +10,8 @@ if str(_SCRIPT_DIR) not in sys.path:
 from evaluation.evaluate_page import levenshtein_distance
 from hough_line_transform_endpoints_no_angle_all import merging_diag, normalize_for_dense_style
 from skimage.transform import probabilistic_hough_line
-from line_filtering import (
-    filter_lines_for_alignment,
-    filter_lines_for_alignment_by_ownership,
-    line_length,
-    line_y_at_x,
-    mean_line_support,
-)
+from line_filtering import line_length, line_y_at_x, mean_line_support
+from line_filtering_v2_1_IoU import filter_lines_for_alignment_by_ownership
 
 
 def parse_args():
@@ -40,11 +29,11 @@ def parse_args():
     parser.add_argument(
         "--fallback-mode",
         type=str,
-        default="argmax",
-        choices=["argmax", "skip"],
+        default="skip",
+        choices=["skip"],
         help=(
             "How to handle x-columns not covered by any line: "
-            "'argmax' maps with matrix argmax(row), 'skip' attaches uncovered runs between two guided runs to the previous guided run and reorders by connected components."
+            "'skip' attaches uncovered runs between two guided runs to the previous guided run and reorders by connected components."
         ),
     )
     parser.add_argument("--target-fname", type=str, default=None, help="Optional exact/basename target file")
@@ -125,6 +114,22 @@ def detect_lines_dense_style_no_angle_seeded(matrix: np.ndarray, seed: int):
         "merged_lines": merged,
     }
 
+
+
+def lines_from_merged_segments(matrix: np.ndarray, merged_lines: list[tuple[tuple[float, float], tuple[float, float]]]) -> list[dict]:
+    lines: list[dict] = []
+    for p0, p1 in merged_lines:
+        line = {
+            "x0": float(p0[0]),
+            "y0": float(p0[1]),
+            "x1": float(p1[0]),
+            "y1": float(p1[1]),
+        }
+        line["length"] = line_length(line)
+        line["support"] = mean_line_support(matrix, line) if matrix.size else 0.0
+        line["score"] = float(line["support"])
+        lines.append(line)
+    return lines
 
 
 def build_pred_blocks(pred_text: str, n_pred: int, stride: int) -> list[str]:
@@ -245,12 +250,6 @@ def align_prediction(
             if best_lid >= 0:
                 mapped_y[x] = float(best_y_idx)
                 mapped_line_id[x] = best_lid
-
-    if fallback_mode == "argmax":
-        uncovered = ~np.isfinite(mapped_y)
-        if np.any(uncovered):
-            for x in np.flatnonzero(uncovered):
-                mapped_y[x] = float(int(np.argmax(matrix[:, x])) if n_ref > 0 else 0)
 
     attached_between_cols = 0
     attached_between_runs = 0
@@ -434,11 +433,17 @@ def main():
                 seed=int(args.hough_seed) + int(item["index"]),
             )
             merged_lines = det.get("merged_lines", [])
+            mask_bool = np.asarray(det.get("mask", np.zeros_like(matrix))) > 0
         else:
             merged_lines = []
+            mask_bool = np.zeros_like(matrix, dtype=bool)
 
         lines_raw = lines_from_merged_segments(matrix, merged_lines)
-        lines_used = filter_lines_for_alignment(lines_raw, matrix)
+        lines_used, column_assignment = filter_lines_for_alignment_by_ownership(
+            lines_raw,
+            matrix,
+            mask_bool,
+        )
 
         aligned = align_prediction(
             pred_text=pred,
@@ -446,6 +451,7 @@ def main():
             lines_read_order=lines_used,
             window_stride=args.window_stride,
             fallback_mode=args.fallback_mode,
+            column_assignment=column_assignment,
         )
 
         adjusted_pred = aligned["adjusted_pred"]
