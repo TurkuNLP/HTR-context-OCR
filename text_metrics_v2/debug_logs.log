@@ -1,0 +1,12 @@
+2026-04-20 14:22:10 | WARNING | churro.utils.llm.config | AZURE_API_VERSION not set; Azure model calls may fail if provider requires explicit version.
+2026-04-20 14:22:10 | DEBUG | churro.utils.llm.config | AZURE_API_BASE is not set; skipping Azure-specific validation until used.
+2026-04-20 14:25:08 | WARNING | churro.utils.llm.config | AZURE_API_VERSION not set; Azure model calls may fail if provider requires explicit version.
+2026-04-20 14:25:08 | DEBUG | churro.utils.llm.config | AZURE_API_BASE is not set; skipping Azure-specific validation until used.
+2026-04-20 14:30:55 | WARNING | churro.utils.llm.config | AZURE_API_VERSION not set; Azure model calls may fail if provider requires explicit version.
+2026-04-20 14:30:55 | DEBUG | churro.utils.llm.config | AZURE_API_BASE is not set; skipping Azure-specific validation until used.
+2026-04-21 08:32:56 | WARNING | churro.utils.llm.config | AZURE_API_VERSION not set; Azure model calls may fail if provider requires explicit version.
+2026-04-21 08:32:56 | DEBUG | churro.utils.llm.config | AZURE_API_BASE is not set; skipping Azure-specific validation until used.
+2026-04-21 08:39:20 | WARNING | churro.utils.llm.config | AZURE_API_VERSION not set; Azure model calls may fail if provider requires explicit version.
+2026-04-21 08:39:20 | DEBUG | churro.utils.llm.config | AZURE_API_BASE is not set; skipping Azure-specific validation until used.
+2026-04-21 08:57:02 | WARNING | churro.utils.llm.config | AZURE_API_VERSION not set; Azure model calls may fail if provider requires explicit version.
+2026-04-21 08:57:02 | DEBUG | churro.utils.llm.config | AZURE_API_BASE is not set; skipping Azure-specific validation until used.

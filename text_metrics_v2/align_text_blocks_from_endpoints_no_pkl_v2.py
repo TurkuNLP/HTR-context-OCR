@@ -12,6 +12,9 @@ from hough_line_transform_endpoints_no_angle_all import merging_diag, normalize_
 from skimage.transform import probabilistic_hough_line
 from line_filtering import line_length, line_y_at_x, mean_line_support
 from line_filtering_v2_1_IoU import filter_lines_for_alignment_by_ownership
+from line_endpoint_records import lines_from_merged_segments as _shared_lines_from_merged_segments
+from runfile_records import load_run_items as _shared_load_run_items, safe_name as _shared_safe_name, same_file as _shared_same_file
+from score_matrix_builder import compute_score_matrix as _shared_compute_score_matrix, sliding_segments as _shared_sliding_segments
 
 
 def parse_args():
@@ -50,30 +53,19 @@ def normalized_levenshtein_similarity(predicted_text: str, gold_text: str) -> fl
 
 
 def same_file(a: str, b: str) -> bool:
-    return str(a) == str(b) or Path(str(a)).name == Path(str(b)).name
+    return _shared_same_file(a, b)
 
 
 def safe_name(name: str) -> str:
-    stem = Path(name).stem
-    stem = re.sub(r"[^A-Za-z0-9._-]+", "_", stem)
-    return stem[:120]
+    return _shared_safe_name(name)
 
 
 def sliding_segments(text: str, window_size: int, window_stride: int) -> list[str]:
-    if len(text) < window_size:
-        return []
-    return [text[i : i + window_size] for i in range(0, len(text) - window_size + 1, window_stride)]
+    return _shared_sliding_segments(text, window_size, window_stride)
 
 
 def compute_score_matrix(ref_text: str, pred_text: str, window_size: int, window_stride: int) -> np.ndarray:
-    ref_segments = sliding_segments(ref_text, window_size, window_stride)
-    pred_segments = sliding_segments(pred_text, window_size, window_stride)
-
-    scores = np.zeros((len(ref_segments), len(pred_segments)), dtype=float)
-    for i, ref_seg in enumerate(ref_segments):
-        for j, pred_seg in enumerate(pred_segments):
-            scores[i, j] = sacrebleu.sentence_chrf(ref_seg, [pred_seg]).score
-    return scores
+    return _shared_compute_score_matrix(ref_text, pred_text, window_size, window_stride)
 
 
 def detect_lines_dense_style_no_angle_seeded(matrix: np.ndarray, seed: int):
@@ -117,19 +109,7 @@ def detect_lines_dense_style_no_angle_seeded(matrix: np.ndarray, seed: int):
 
 
 def lines_from_merged_segments(matrix: np.ndarray, merged_lines: list[tuple[tuple[float, float], tuple[float, float]]]) -> list[dict]:
-    lines: list[dict] = []
-    for p0, p1 in merged_lines:
-        line = {
-            "x0": float(p0[0]),
-            "y0": float(p0[1]),
-            "x1": float(p1[0]),
-            "y1": float(p1[1]),
-        }
-        line["length"] = line_length(line)
-        line["support"] = mean_line_support(matrix, line) if matrix.size else 0.0
-        line["score"] = float(line["support"])
-        lines.append(line)
-    return lines
+    return _shared_lines_from_merged_segments(matrix, merged_lines)
 
 
 def build_pred_blocks(pred_text: str, n_pred: int, stride: int) -> list[str]:
@@ -353,24 +333,7 @@ def align_prediction(
 
 
 def load_run_items(runfile_json: Path) -> list[dict]:
-    data = json.loads(runfile_json.read_text(encoding="utf-8"))
-    if not isinstance(data, list):
-        raise ValueError(f"Expected runfile JSON list, got: {type(data).__name__}")
-
-    out: list[dict] = []
-    for idx, item in enumerate(data):
-        if not isinstance(item, dict):
-            continue
-        file_name = str(item.get("file_name", item.get("fname", f"item_{idx:04d}")))
-        out.append(
-            {
-                "index": idx,
-                "fname": Path(file_name).name,
-                "pred": str(item.get("normalized_predicted_text", item.get("pred", ""))),
-                "ref": str(item.get("normalized_gold_text", item.get("ref", ""))),
-            }
-        )
-    return out
+    return _shared_load_run_items(runfile_json)
 
 
 def write_case_report(path: Path, row: dict, lines_used: list[dict], matrix_shape: tuple[int, int], args):

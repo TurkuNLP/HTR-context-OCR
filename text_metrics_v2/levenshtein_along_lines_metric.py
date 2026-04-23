@@ -9,21 +9,14 @@ _SCRIPT_DIR = Path(__file__).resolve().parent
 if str(_SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPT_DIR))
 
-from align_text_blocks_from_endpoints_no_pkl_v2 import (
-    build_pred_blocks,
-    compute_score_matrix,
-    lines_from_merged_segments,
-    load_run_items,
-    normalized_levenshtein_similarity,
-    same_file,
-    safe_name,
-)
-from hough_line_transform_endpoints_no_angle_all import detect_lines_dense_style_diagonal_fixed_theta
+from line_alignment_pipeline import detect_and_filter_lines_from_matrix
+from levenshtein_metric import BACKEND_PYTHON, SUPPORTED_BACKENDS, compute_levenshtein_metrics
 from line_filtering_v2_1_IoU import (
     DEFAULT_ABS_MIN_LEN,
     DEFAULT_MIN_IOU_THRESHOLD,
-    filter_lines_for_alignment_by_ownership,
 )
+from runfile_records import load_run_items, same_file, safe_name
+from score_matrix_builder import compute_score_matrix
 
 __all__ = ["run_levenshtein_along_lines_metric"]
 
@@ -60,115 +53,14 @@ def parse_args():
         default=DEFAULT_MIN_IOU_THRESHOLD,
         help="Minimum true-IoU threshold used to merge overlapping line coverages.",
     )
+    p.add_argument(
+        "--levenshtein-backend",
+        type=str,
+        default=BACKEND_PYTHON,
+        choices=tuple(SUPPORTED_BACKENDS),
+        help="Levenshtein backend. 'python' keeps current implementation; 'c' uses exact C-backed distance.",
+    )
     return p.parse_args()
-
-
-def _empty_column_assignment(n_pred: int) -> dict[str, np.ndarray]:
-    return {
-        "mapped_y": np.full(n_pred, np.nan, dtype=float),
-        "mapped_line_id": np.full(n_pred, -1, dtype=int),
-    }
-
-
-def _ordered_unique(values: list[int]) -> list[int]:
-    out: list[int] = []
-    seen: set[int] = set()
-    for value in values:
-        if value in seen:
-            continue
-        out.append(int(value))
-        seen.add(int(value))
-    return out
-
-
-def _is_non_decreasing(values: list[int]) -> bool:
-    return all(a <= b for a, b in zip(values, values[1:]))
-
-
-def _reference_rows_for_line(owned_cols: list[int], mapped_y: np.ndarray, n_ref: int) -> tuple[list[int], bool]:
-    if n_ref <= 0:
-        return [], False
-
-    rows = [
-        int(np.clip(round(float(mapped_y[x])), 0, n_ref - 1))
-        for x in owned_cols
-        if 0 <= int(x) < mapped_y.shape[0] and np.isfinite(mapped_y[x])
-    ]
-    if not rows:
-        return [], False
-
-    unique_rows = _ordered_unique(rows)
-    if _is_non_decreasing(unique_rows):
-        return unique_rows, False
-
-    return sorted(set(unique_rows)), True
-
-
-def _build_line_similarity_reports(
-    *,
-    pred_text: str,
-    ref_text: str,
-    lines_used: list[dict],
-    column_assignment: dict,
-    window_stride: int,
-    n_ref: int,
-    n_pred: int,
-) -> list[dict]:
-    mapped_y = np.asarray(column_assignment.get("mapped_y", []), dtype=float)
-    mapped_line_id = np.asarray(column_assignment.get("mapped_line_id", []), dtype=int)
-    if mapped_y.shape != (n_pred,) or mapped_line_id.shape != (n_pred,):
-        raise ValueError(
-            "column_assignment must provide mapped_y and mapped_line_id arrays with shape "
-            f"({n_pred},), got {mapped_y.shape} and {mapped_line_id.shape}"
-        )
-
-    pred_blocks = build_pred_blocks(pred_text, n_pred=n_pred, stride=window_stride)
-    ref_blocks = build_pred_blocks(ref_text, n_pred=n_ref, stride=window_stride)
-
-    rows: list[dict] = []
-    for lid, line in enumerate(lines_used):
-        owned_cols = [int(x) for x in np.flatnonzero(mapped_line_id == lid)]
-        if not owned_cols:
-            continue
-
-        ref_rows, ref_rows_reordered = _reference_rows_for_line(owned_cols, mapped_y, n_ref=n_ref)
-        pred_line_text = "".join(pred_blocks[x] for x in owned_cols if 0 <= x < len(pred_blocks))
-        ref_line_text = "".join(ref_blocks[y] for y in ref_rows if 0 <= y < len(ref_blocks))
-        score = normalized_levenshtein_similarity(pred_line_text, ref_line_text)
-
-        rows.append(
-            {
-                "line_id": int(lid),
-                "normalized_levenshtein_similarity": float(score),
-                "pred_text": pred_line_text,
-                "ref_text": ref_line_text,
-                "pred_char_len": int(len(pred_line_text)),
-                "ref_char_len": int(len(ref_line_text)),
-                "owned_column_count": int(len(owned_cols)),
-                "pred_column_start": int(owned_cols[0]),
-                "pred_column_end": int(owned_cols[-1]),
-                "mapped_ref_row_count": int(len(ref_rows)),
-                "mapped_ref_row_start": None if not ref_rows else int(ref_rows[0]),
-                "mapped_ref_row_end": None if not ref_rows else int(ref_rows[-1]),
-                "mapped_ref_rows": ref_rows,
-                "ref_rows_reordered_for_monotonicity": bool(ref_rows_reordered),
-                "x0": float(line.get("x0", 0.0)),
-                "y0": float(line.get("y0", 0.0)),
-                "x1": float(line.get("x1", 0.0)),
-                "y1": float(line.get("y1", 0.0)),
-                "score": float(line.get("score", 0.0)),
-                "length": float(line.get("length", 0.0)),
-                "support": float(line.get("support", 0.0)),
-                "owned_cols": int(line.get("owned_cols", len(owned_cols))),
-                "owned_fraction": float(line.get("owned_fraction", 0.0)),
-                "owned_score_mean": float(line.get("owned_score_mean", 0.0)),
-                "owned_mask_hits": int(line.get("owned_mask_hits", 0)),
-                "owned_mask_fraction": float(line.get("owned_mask_fraction", 0.0)),
-                "anchor_y": float(line.get("anchor_y", min(line.get("y0", 0.0), line.get("y1", 0.0)))),
-            }
-        )
-
-    return rows
 
 
 def _compute_levenshtein_along_lines_metric(
@@ -186,6 +78,7 @@ def _compute_levenshtein_along_lines_metric(
     align_abs_min_len: float = DEFAULT_ABS_MIN_LEN,
     align_min_iou_threshold: float = DEFAULT_MIN_IOU_THRESHOLD,
     precomputed_matrix: np.ndarray | None = None,
+    levenshtein_backend: str = BACKEND_PYTHON,
 ) -> dict:
     if precomputed_matrix is None:
         matrix = compute_score_matrix(
@@ -200,64 +93,48 @@ def _compute_levenshtein_along_lines_metric(
             raise ValueError(f"Expected 2D matrix, got shape={matrix.shape!r}")
         matrix = np.nan_to_num(matrix, nan=0.0, posinf=0.0, neginf=0.0)
 
-    if matrix.size > 0 and matrix.shape[0] > 0 and matrix.shape[1] > 0:
-        det = detect_lines_dense_style_diagonal_fixed_theta(
-            matrix,
-            seed=int(hough_seed) + int(item_index),
-            threshold=int(hough_threshold),
-            line_length=int(hough_line_length),
-            line_gap=int(hough_line_gap),
-            start_init=float(hough_start),
-        )
-        merged_lines = det.get("merged_lines", [])
-        mask_bool = np.asarray(det.get("mask", np.zeros_like(matrix))) > 0
-        lines_raw = lines_from_merged_segments(matrix, merged_lines)
-        lines_used, column_assignment = filter_lines_for_alignment_by_ownership(
-            lines_raw,
-            matrix,
-            mask_bool,
-            abs_min_len=float(align_abs_min_len),
-            min_iou_threshold=float(align_min_iou_threshold),
-        )
-    else:
-        det = {
-            "threshold_start": float("nan"),
-            "mask": np.zeros_like(matrix),
-            "raw_lines": [],
-            "selected_lines": [],
-            "merged_lines": [],
-        }
-        lines_raw = []
-        lines_used = []
-        n_pred = matrix.shape[1] if matrix.ndim == 2 else 0
-        column_assignment = _empty_column_assignment(n_pred)
+    payload = detect_and_filter_lines_from_matrix(
+        matrix,
+        item_index=int(item_index),
+        hough_threshold=int(hough_threshold),
+        hough_line_length=int(hough_line_length),
+        hough_line_gap=int(hough_line_gap),
+        hough_seed=int(hough_seed),
+        hough_start=float(hough_start),
+        align_abs_min_len=float(align_abs_min_len),
+        align_min_iou_threshold=float(align_min_iou_threshold),
+    )
+    det = payload["det"]
+    lines_raw = payload["lines_for_filtering"]
+    lines_used = payload["lines_used"]
+    column_assignment = payload["column_assignment"]
 
     n_ref = int(matrix.shape[0]) if matrix.ndim == 2 else 0
     n_pred = int(matrix.shape[1]) if matrix.ndim == 2 else 0
-    line_reports = _build_line_similarity_reports(
-        pred_text=pred_text,
+
+    lev = compute_levenshtein_metrics(
         ref_text=ref_text,
+        other_text=pred_text,
         lines_used=lines_used,
         column_assignment=column_assignment,
-        window_stride=window_stride,
         n_ref=n_ref,
-        n_pred=n_pred,
+        n_other=n_pred,
+        window_stride=window_stride,
+        backend=levenshtein_backend,
     )
-
-    line_scores = [row["normalized_levenshtein_similarity"] for row in line_reports]
-    document_along_lines = None if not line_scores else float(sum(line_scores) / len(line_scores))
-    mapped_line_id = np.asarray(column_assignment["mapped_line_id"], dtype=int)
 
     return {
         "whole_document_normalized_levenshtein_similarity": float(
-            normalized_levenshtein_similarity(pred_text, ref_text)
+            lev["whole_document_normalized_levenshtein_similarity"]
         ),
-        "document_normalized_levenshtein_similarity_along_lines": document_along_lines,
-        "line_count": int(len(line_reports)),
+        "document_normalized_levenshtein_similarity_along_lines": lev[
+            "document_normalized_levenshtein_similarity_along_lines"
+        ],
+        "line_count": int(lev["line_count"]),
         "raw_line_count": int(len(lines_raw)),
         "used_line_count": int(len(lines_used)),
-        "line_guided_columns": int(np.sum(mapped_line_id >= 0)),
-        "fallback_columns": int(np.sum(mapped_line_id < 0)),
+        "line_guided_columns": int(lev["line_guided_columns"]),
+        "fallback_columns": int(lev["fallback_columns"]),
         "matrix_shape": [n_ref, n_pred],
         "threshold_start": float(det.get("threshold_start", float("nan"))),
         "hough_threshold": int(hough_threshold),
@@ -268,7 +145,8 @@ def _compute_levenshtein_along_lines_metric(
         "line_filter_version": "v2_1_true_iou",
         "line_filter_abs_min_len": float(align_abs_min_len),
         "line_filter_min_iou_threshold": float(align_min_iou_threshold),
-        "lines": line_reports,
+        "levenshtein_backend": str(levenshtein_backend),
+        "lines": lev["lines"],
     }
 
 
@@ -287,8 +165,8 @@ def run_levenshtein_along_lines_metric(
     align_abs_min_len: float = DEFAULT_ABS_MIN_LEN,
     align_min_iou_threshold: float = DEFAULT_MIN_IOU_THRESHOLD,
     precomputed_matrix: np.ndarray | None = None,
+    levenshtein_backend: str = BACKEND_PYTHON,
 ) -> dict:
-    """Public API: compute whole-document and along-lines Levenshtein metrics."""
     return _compute_levenshtein_along_lines_metric(
         pred_text=pred_text,
         ref_text=ref_text,
@@ -303,6 +181,7 @@ def run_levenshtein_along_lines_metric(
         align_abs_min_len=align_abs_min_len,
         align_min_iou_threshold=align_min_iou_threshold,
         precomputed_matrix=precomputed_matrix,
+        levenshtein_backend=levenshtein_backend,
     )
 
 
@@ -320,6 +199,7 @@ def process_item(item: dict, args) -> dict:
         hough_start=float(args.hough_start),
         align_abs_min_len=float(args.align_abs_min_len),
         align_min_iou_threshold=float(args.align_min_iou_threshold),
+        levenshtein_backend=str(args.levenshtein_backend),
     )
     return {
         "index": int(item["index"]),
@@ -348,6 +228,10 @@ def main():
         raise ValueError("align-abs-min-len must be positive")
     if not (0.0 <= args.align_min_iou_threshold <= 1.0):
         raise ValueError("align-min-iou-threshold must satisfy 0.0 <= value <= 1.0")
+    if str(args.levenshtein_backend) not in SUPPORTED_BACKENDS:
+        raise ValueError(
+            f"Unsupported Levenshtein backend {args.levenshtein_backend!r}; expected one of {SUPPORTED_BACKENDS!r}"
+        )
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
     run_items = load_run_items(args.runfile_json)
@@ -406,6 +290,7 @@ def main():
         "line_filter_version": "v2_1_true_iou",
         "line_filter_abs_min_len": float(args.align_abs_min_len),
         "line_filter_min_iou_threshold": float(args.align_min_iou_threshold),
+        "levenshtein_backend": str(args.levenshtein_backend),
         "average_whole_document_normalized_levenshtein_similarity": float(avg_whole),
         "average_document_normalized_levenshtein_similarity_along_lines": avg_along_lines,
         "items": rows,
