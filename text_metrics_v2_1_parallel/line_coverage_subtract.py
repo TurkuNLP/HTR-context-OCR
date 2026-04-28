@@ -12,8 +12,8 @@ if str(_SCRIPT_DIR) not in sys.path:
 from line_metric_bundle import accumulate_counts_from_interval_groups
 from runfile_records import load_run_items, same_file
 from count_line_character_coverage import (
-    _derive_filtered_line_endpoints,
-    _load_filtered_line_endpoints,
+    derive_filtered_line_endpoints_from_text,
+    load_filtered_line_endpoints,
     count_text_on_lne,
 )
 
@@ -169,7 +169,7 @@ def _resolve_line_endpoints(
     args: argparse.Namespace,
 ) -> list:
     if endpoint_json is not None:
-        return _load_filtered_line_endpoints(endpoint_json)
+        return load_filtered_line_endpoints(endpoint_json)
 
     if not bool(args.allow_derive_endpoints):
         raise ValueError(
@@ -177,7 +177,7 @@ def _resolve_line_endpoints(
             "Pass endpoint JSONs or enable --allow-derive-endpoints."
         )
 
-    lines_used, _ = _derive_filtered_line_endpoints(
+    lines_used, _ = derive_filtered_line_endpoints_from_text(
         ref_text=ref_text,
         pred_text=pred_text,
         item_index=item_index,

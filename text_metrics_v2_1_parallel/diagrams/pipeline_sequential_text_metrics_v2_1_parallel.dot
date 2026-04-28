@@ -1,0 +1,154 @@
+digraph SequentialPipeline {
+  graph [
+    rankdir=TB,
+    splines=polyline,
+    nodesep=0.55,
+    ranksep=0.85,
+    pad=0.30,
+    margin=0.18,
+    bgcolor="white",
+    fontname="Helvetica",
+    labelloc=t,
+    label=<
+      <B>Sequential Pipeline</B><BR/>
+      <FONT POINT-SIZE="12">text_metrics_v2_1_parallel</FONT>
+    >
+  ];
+
+  node [fontname="Helvetica", fontsize=15, penwidth=1.9, color="#334155", margin="0.22,0.16"];
+  edge [fontname="Helvetica", fontsize=11, color="#475569", arrowsize=0.8, penwidth=1.5];
+
+  input_data [shape=parallelogram, style="filled", fillcolor="#eef2ff",
+    label=<
+      <B>1) Input data</B><BR/>
+      <FONT POINT-SIZE="12">runfile and/or scores.pkl</FONT>
+    >];
+
+  validate [shape=box, style="rounded,filled", fillcolor="#f8fafc",
+    label=<
+      <B>2) Shell entry, parse, validate</B><BR/>
+      <FONT POINT-SIZE="12">launch Python and check args, files, workers</FONT>
+    >];
+
+  index_cache [shape=cylinder, style="filled", fillcolor="#ecfeff",
+    label=<
+      <B>3) Score index cache</B><BR/>
+      <FONT POINT-SIZE="12">build or reuse stream index for each scores.pkl</FONT>
+    >];
+
+  select_items [shape=box, style="rounded,filled", fillcolor="#f8fafc",
+    label=<
+      <B>4) Select items and open temp spools</B><BR/>
+      <FONT POINT-SIZE="12">choose source, apply target/max filters, create JSONL spools</FONT>
+    >];
+
+  loop_items [shape=box, style="rounded,filled", fillcolor="#f8fafc",
+    label=<
+      <B>5) Iterate selected items</B><BR/>
+      <FONT POINT-SIZE="12">process one document at a time in seq_id order</FONT>
+    >];
+
+  pred_empty [shape=diamond, style="filled", fillcolor="#fff7ed",
+    label=<
+      <B>6) Empty prediction?</B>
+    >];
+
+  skip_env [shape=note, style="filled", fillcolor="#fef2f2",
+    label=<
+      <B>7a) Skip envelope</B><BR/>
+      <FONT POINT-SIZE="12">record skipped_empty_prediction</FONT>
+    >];
+
+  subgraph cluster_core {
+    label=<
+      <B>7b) Non-empty document core</B><BR/>
+      <FONT POINT-SIZE="12">same process_item flow later reused by parallel workers</FONT>
+    >;
+    fontsize=15;
+    fontname="Helvetica";
+    color="#94a3b8";
+    penwidth=1.6;
+    style="rounded,dashed";
+
+    matrices [shape=box, style="rounded,filled", fillcolor="#f8fafc",
+      label=<
+        <B>A) Matrix provider</B><BR/>
+        <FONT POINT-SIZE="12">load from indexed scores.pkl or compute</FONT><BR/>
+        <FONT POINT-SIZE="11">per-doc cache for ref→pred and ref→ref</FONT>
+      >];
+
+    lines [shape=box, style="rounded,filled", fillcolor="#f8fafc",
+      label=<
+        <B>B) Detect and filter lines</B><BR/>
+        <FONT POINT-SIZE="12">run Hough plus filtering on ref→pred and ref→ref</FONT>
+      >];
+
+    bundles [shape=component, style="filled", fillcolor="#ede9fe",
+      label=<
+        <B>C) Build reusable line bundles</B><BR/>
+        <FONT POINT-SIZE="12">cache per-line window IDs and character intervals</FONT>
+      >];
+
+    arrays [shape=component, style="filled", fillcolor="#ede9fe",
+      label=<
+        <B>D) Build coverage arrays once</B><BR/>
+        <FONT POINT-SIZE="12">refref_y, other_y, other_x, y_diff</FONT>
+      >];
+
+    visuals [shape=diamond, style="filled", fillcolor="#fff7ed",
+      label=<
+        <B>E) Visuals enabled?</B>
+      >];
+
+    render_and_release [shape=box, style="rounded,filled", fillcolor="#fefce8",
+      label=<
+        <B>F) Optional visuals, then release heavy matrices</B><BR/>
+        <FONT POINT-SIZE="12">lazy import render code, keep only bundles, arrays, texts</FONT>
+      >];
+
+    metrics [shape=box, style="rounded,filled", fillcolor="#f8fafc",
+      label=<
+        <B>G) Compute metrics from cached bundles and arrays</B><BR/>
+        <FONT POINT-SIZE="12">whole-doc NLS, along-lines NLS, ok, missing, repetition, hallucination</FONT>
+      >];
+
+    success_env [shape=note, style="filled", fillcolor="#dcfce7",
+      label=<
+        <B>H) Success envelope</B><BR/>
+        <FONT POINT-SIZE="12">result payload and optional timings</FONT>
+      >];
+
+    failed_env [shape=note, style="filled", fillcolor="#fee2e2",
+      label=<
+        <B>I) Failed envelope</B><BR/>
+        <FONT POINT-SIZE="12">per-document exception details</FONT>
+      >];
+
+    matrices -> lines -> bundles -> arrays -> visuals;
+    visuals -> render_and_release;
+    render_and_release -> metrics -> success_env;
+    matrices -> failed_env [style=dashed];
+    lines -> failed_env [style=dashed];
+    metrics -> failed_env [style=dashed];
+  }
+
+  ordered_flush [shape=hexagon, style="filled", fillcolor="#f3e8ff",
+    label=<
+      <B>8) Ordered flush</B><BR/>
+      <FONT POINT-SIZE="12">write envelopes only when next seq_id is ready</FONT>
+    >];
+
+  final_reports [shape=cylinder, style="filled", fillcolor="#dcfce7",
+    label=<
+      <B>9) Final report files</B><BR/>
+      <FONT POINT-SIZE="12">report.json, skipped, failed, report_timings.json?</FONT>
+    >];
+
+  input_data -> validate -> index_cache -> select_items -> loop_items -> pred_empty;
+  pred_empty -> skip_env [label="yes"];
+  pred_empty -> matrices [label="no"];
+  skip_env -> ordered_flush;
+  success_env -> ordered_flush;
+  failed_env -> ordered_flush;
+  ordered_flush -> final_reports;
+}
