@@ -23,15 +23,14 @@ The detector logic/thresholds are intentionally kept identical to
 
 # Fixed theta range used by downstream alignment scripts.
 # In Hough space this is the normal angle (not line direction angle).
-# Keeping line-direction angles in [35 deg, 90 deg) maps to normal-angle
-# bands [-55 deg, 0 deg) U (0 deg, 55 deg], which preserves both
-# diagonal slants while excluding perfectly vertical 90 deg lines.
+# Keeping line-direction angles in [30 deg, 60 deg) maps to normal-angle
+# bands [-60 deg, -30 deg) U (30 deg, 60 deg], which preserves both
+# diagonal slants while excluding near-horizontal and near-vertical lines.
 DIAGONAL_THETA_DEG = np.r_[
-    np.arange(-55, 0, 0.5),
-    np.arange(0.5, 55 + 0.5, 0.5),
+    np.arange(-60, -30, 0.5),
+    np.arange(30.5, 60 + 0.5, 0.5),
 ]
 DIAGONAL_THETA_RAD = np.deg2rad(DIAGONAL_THETA_DEG)
-
 
 def safe_matrix(scores) -> np.ndarray:
     mat = np.asarray(scores, dtype=float)

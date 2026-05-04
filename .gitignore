@@ -10,3 +10,6 @@ __pycache__/
 
 # Project score/index cache artifacts
 .score_index_cache/
+
+# Generated diagram outputs
+**/diagrams/

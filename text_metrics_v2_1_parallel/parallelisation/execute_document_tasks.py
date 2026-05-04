@@ -43,6 +43,34 @@ def build_worker_args_payload(args: argparse.Namespace) -> dict:
     }
 
 
+def build_effective_worker_args_payload(
+    *,
+    base_args_payload: dict,
+    item_fname: str,
+    per_doc_hough_params_by_fname: dict[str, dict[str, int]] | None,
+) -> dict:
+    """Build worker args for one item by applying optional per-doc Hough overrides.
+
+    Metric logic remains unchanged. This function only determines which parameter
+    values are passed into the existing pipeline for a single document.
+    """
+    effective = dict(base_args_payload)
+    if not per_doc_hough_params_by_fname:
+        return effective
+
+    fname = Path(str(item_fname)).name
+    override = per_doc_hough_params_by_fname.get(fname)
+    if not override:
+        return effective
+
+    # Override only the tuned Hough knobs. Non-tuned parameters keep global values.
+    for key in ("hough_threshold", "hough_line_length", "hough_line_gap", "hough_seed"):
+        if key in override:
+            effective[key] = int(override[key])
+
+    return effective
+
+
 def build_item_score_index_subset(
     score_index_by_kind: dict[str, dict[str, dict]],
     *,
@@ -199,6 +227,7 @@ def execute_document_tasks(
     failed_f,
     timing_f,
     state: dict,
+    per_doc_hough_params_by_fname: dict[str, dict[str, int]] | None = None,
 ) -> None:
     """Execute all selected document tasks via one shared scheduler implementation.
 
@@ -239,13 +268,18 @@ def execute_document_tasks(
                 score_index_by_kind,
                 item_fname=item_fname,
             )
+            effective_worker_args_payload = build_effective_worker_args_payload(
+                base_args_payload=worker_args_payload,
+                item_fname=item_fname,
+                per_doc_hough_params_by_fname=per_doc_hough_params_by_fname,
+            )
 
             future_start = time.perf_counter()
             fut = executor.submit(
                 run_non_empty_item_task,
                 seq_id=seq_id,
                 item=item,
-                args_payload=worker_args_payload,
+                args_payload=effective_worker_args_payload,
                 visual_output_dir_str=str(visual_output_dir),
                 score_index_by_kind_item=item_score_index_subset,
                 scores_pkl_paths_by_kind_raw=scores_pkl_paths_by_kind_raw,

@@ -2,15 +2,19 @@
 #SBATCH --job-name=text_metrics_report_v2_1_parallel
 #SBATCH --account=project_2000539
 #SBATCH --partition=medium
-#SBATCH --time=01:50:00
+#SBATCH --time=01:00:00
 #SBATCH --nodes=1
-#SBATCH --ntasks-per-node=128
-#SBATCH --mem=24G
-#SBATCH --chdir=/scratch/project_2017385/dorian/Churro_copy/text_metrics_v2_1_parallel
-#SBATCH -o /scratch/project_2017385/dorian/Churro_copy/logs/text_metrics_report_v2_1_parallel_%j.out
-#SBATCH -e /scratch/project_2017385/dorian/Churro_copy/logs/text_metrics_report_v2_1_parallel_%j.err
+#SBATCH --ntasks-per-node=1
+#SBATCH --mem=20G
+#SBATCH --chdir=/scratch/project_2017385/dorian/HTR-context-OCR/text_metrics_v2_1_parallel
+#SBATCH -o /scratch/project_2017385/dorian/HTR-context-OCR/logs/text_metrics_report_v2_1_parallel_%j.out
+#SBATCH -e /scratch/project_2017385/dorian/HTR-context-OCR/logs/text_metrics_report_v2_1_parallel_%j.err
 
 set -euo pipefail
+
+# Preserve the original CLI args so we can re-submit with matching Slurm resources
+# when --workers and allocated ntasks-per-node differ.
+ORIGINAL_ARGS=("$@")
 
 if command -v module >/dev/null 2>&1; then
   module purge
@@ -18,7 +22,9 @@ if command -v module >/dev/null 2>&1; then
   module load pytorch
 fi
 
-SCRIPT_DIR="/scratch/project_2017385/dorian/Churro_copy/text_metrics_v2_1_parallel"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+LOG_DIR="${PROJECT_DIR}/logs"
 cd "${SCRIPT_DIR}"
 
 RUNFILE_JSON="${RUNFILE_JSON:-}"
@@ -27,7 +33,7 @@ SCORES_PKL_ROOT="${SCORES_PKL_ROOT:-}"
 SCORES_PKL_REF_TO_PRED="${SCORES_PKL_REF_TO_PRED:-}"
 SCORES_PKL_REF_TO_REF="${SCORES_PKL_REF_TO_REF:-}"
 SCORES_PKL_REF_TO_ADJUSTED_PRED="${SCORES_PKL_REF_TO_ADJUSTED_PRED:-}"
-PROJECT_ROOT_RESULTS="${PROJECT_ROOT_RESULTS:-/scratch/project_2017385/dorian/Churro_copy/results/text_metrics_results_v2_1_parallel}"
+PROJECT_ROOT_RESULTS="${PROJECT_ROOT_RESULTS:-${PROJECT_DIR}/results/text_metrics_results_v2_1_parallel}"
 OUTPUT_DIR="${OUTPUT_DIR:-}"
 WINDOW_SIZE="${WINDOW_SIZE:-50}"
 WINDOW_STRIDE="${WINDOW_STRIDE:-35}"
@@ -44,6 +50,9 @@ ALIGN_MIN_IOU_THRESHOLD="${ALIGN_MIN_IOU_THRESHOLD:-}"
 LEVENSHTEIN_BACKEND="${LEVENSHTEIN_BACKEND:-c}"
 WITH_VISUALS="${WITH_VISUALS:-0}"
 REPORT_DEBUG="${REPORT_DEBUG:-0}"
+HOUGH_PARAMS_PER_DOCUMENT_JSON="${HOUGH_PARAMS_PER_DOCUMENT_JSON:-}"
+HOUGH_PARAMS_SELECTION_MODE="${HOUGH_PARAMS_SELECTION_MODE:-only_json_docs}"
+HOUGH_PARAMS_STRICT="${HOUGH_PARAMS_STRICT:-0}"
 
 usage() {
   cat <<'USAGE'
@@ -87,6 +96,11 @@ V2.1 IoU filter parameters:
   --align-abs-min-len <float>                 Minimum line length before v2.1 IoU filtering. Default: 6.0
   --align-min-iou-threshold <float>           Optional override in [0,1]. If omitted, script default is used.
 
+
+Per-document Hough overrides:
+  --hough-params-per-document-json <path>      Optional best_params_per_document.json (tuner output).
+  --hough-params-selection-mode <mode>         only_json_docs | all_selected_docs. Default: only_json_docs
+  --hough-params-strict                        Fail on JSON/selection mismatches instead of fallback.
 Levenshtein backend:
   --levenshtein-backend <c>            Backend for Levenshtein calculations. Default: c
 
@@ -96,6 +110,16 @@ Debug:
 Other:
   -h, --help                                  Show this help text.
 USAGE
+}
+
+parse_ntasks_per_node() {
+  # SLURM_NTASKS_PER_NODE may look like "124" or "124(x1)".
+  local raw="${1:-}"
+  raw="${raw%%(*}"
+  raw="${raw//[[:space:]]/}"
+  if [[ "${raw}" =~ ^[0-9]+$ ]]; then
+    echo "${raw}"
+  fi
 }
 
 while [[ $# -gt 0 ]]; do
@@ -200,6 +224,20 @@ while [[ $# -gt 0 ]]; do
       ALIGN_MIN_IOU_THRESHOLD="$2"
       shift 2
       ;;
+    --hough-params-per-document-json)
+      [[ $# -ge 2 ]] || { echo "[error] --hough-params-per-document-json requires a value" >&2; exit 1; }
+      HOUGH_PARAMS_PER_DOCUMENT_JSON="$2"
+      shift 2
+      ;;
+    --hough-params-selection-mode)
+      [[ $# -ge 2 ]] || { echo "[error] --hough-params-selection-mode requires a value" >&2; exit 1; }
+      HOUGH_PARAMS_SELECTION_MODE="$2"
+      shift 2
+      ;;
+    --hough-params-strict)
+      HOUGH_PARAMS_STRICT="1"
+      shift
+      ;;
     --levenshtein-backend)
       [[ $# -ge 2 ]] || { echo "[error] --levenshtein-backend requires a value" >&2; exit 1; }
       LEVENSHTEIN_BACKEND="$2"
@@ -255,6 +293,10 @@ if [[ -n "${SCORES_PKL_REF_TO_ADJUSTED_PRED}" && ! -f "${SCORES_PKL_REF_TO_ADJUS
   exit 1
 fi
 
+if [[ -n "${HOUGH_PARAMS_PER_DOCUMENT_JSON}" && ! -f "${HOUGH_PARAMS_PER_DOCUMENT_JSON}" ]]; then
+  echo "[error] HOUGH_PARAMS_PER_DOCUMENT_JSON does not exist: ${HOUGH_PARAMS_PER_DOCUMENT_JSON}" >&2
+  exit 1
+fi
 if [[ -z "${OUTPUT_DIR}" && -z "${PROJECT_ROOT_RESULTS}" ]]; then
   echo "[error] PROJECT_ROOT_RESULTS must not be empty when --output-dir is not set" >&2
   exit 1
@@ -317,8 +359,45 @@ if [[ "${REPORT_DEBUG}" != "0" && "${REPORT_DEBUG}" != "1" ]]; then
   echo "[error] REPORT_DEBUG must be 0 or 1 (got: ${REPORT_DEBUG})" >&2
   exit 1
 fi
+if [[ "${HOUGH_PARAMS_SELECTION_MODE}" != "only_json_docs" && "${HOUGH_PARAMS_SELECTION_MODE}" != "all_selected_docs" ]]; then
+  echo "[error] --hough-params-selection-mode must be one of: only_json_docs, all_selected_docs (got: ${HOUGH_PARAMS_SELECTION_MODE})" >&2
+  exit 1
+fi
+if [[ "${HOUGH_PARAMS_STRICT}" != "0" && "${HOUGH_PARAMS_STRICT}" != "1" ]]; then
+  echo "[error] HOUGH_PARAMS_STRICT must be 0 or 1 (got: ${HOUGH_PARAMS_STRICT})" >&2
+  exit 1
+fi
+if [[ "${HOUGH_PARAMS_STRICT}" == "1" && -z "${HOUGH_PARAMS_PER_DOCUMENT_JSON}" ]]; then
+  echo "[error] --hough-params-strict requires --hough-params-per-document-json" >&2
+  exit 1
+fi
 if [[ "${LEVENSHTEIN_BACKEND}" != "c" ]]; then
   echo "[error] --levenshtein-backend must be: c (got: ${LEVENSHTEIN_BACKEND})" >&2
+  exit 1
+fi
+
+# Keep Slurm allocation aligned with --workers.
+# Slurm directives are static at submit time, so we re-submit if needed.
+ALLOCATED_NTASKS_PER_NODE=""
+if [[ -n "${SLURM_JOB_ID:-}" ]]; then
+  ALLOCATED_NTASKS_PER_NODE="$(parse_ntasks_per_node "${SLURM_NTASKS_PER_NODE:-}")"
+fi
+
+if [[ -z "${SLURM_JOB_ID:-}" ]]; then
+  echo "[submit] No active Slurm job detected. Submitting with --ntasks-per-node=${WORKERS}."
+  sbatch --export=ALL,TMR_RESUBMITTED=1 --ntasks-per-node="${WORKERS}" "$0" "${ORIGINAL_ARGS[@]}"
+  exit 0
+fi
+
+if [[ -n "${ALLOCATED_NTASKS_PER_NODE}" && "${ALLOCATED_NTASKS_PER_NODE}" != "${WORKERS}" ]]; then
+  if [[ "${TMR_RESUBMITTED:-0}" != "1" ]]; then
+    echo "[submit] Current allocation ntasks-per-node=${ALLOCATED_NTASKS_PER_NODE} does not match --workers=${WORKERS}."
+    echo "[submit] Re-submitting this job with --ntasks-per-node=${WORKERS}."
+    sbatch --export=ALL,TMR_RESUBMITTED=1 --ntasks-per-node="${WORKERS}" "$0" "${ORIGINAL_ARGS[@]}"
+    exit 0
+  fi
+  echo "[error] Allocation mismatch persists after re-submit: ntasks-per-node=${ALLOCATED_NTASKS_PER_NODE}, --workers=${WORKERS}." >&2
+  echo "[error] Submit manually with: sbatch --ntasks-per-node=${WORKERS} $0 ..." >&2
   exit 1
 fi
 
@@ -339,7 +418,7 @@ else
   REPORT_DIR="${RUN_DIR}/text_metrics_report"
 fi
 
-mkdir -p "${REPORT_DIR}" "/scratch/project_2017385/dorian/Churro_copy/logs"
+mkdir -p "${REPORT_DIR}" "${LOG_DIR}"
 if [[ -n "${RUN_DIR}" ]]; then
   mkdir -p "${RUN_DIR}"
 fi
@@ -384,6 +463,13 @@ fi
 if [[ -n "${ALIGN_MIN_IOU_THRESHOLD}" ]]; then
   PY_ARGS+=(--align-min-iou-threshold "${ALIGN_MIN_IOU_THRESHOLD}")
 fi
+if [[ -n "${HOUGH_PARAMS_PER_DOCUMENT_JSON}" ]]; then
+  PY_ARGS+=(--hough-params-per-document-json "${HOUGH_PARAMS_PER_DOCUMENT_JSON}")
+  PY_ARGS+=(--hough-params-selection-mode "${HOUGH_PARAMS_SELECTION_MODE}")
+fi
+if [[ "${HOUGH_PARAMS_STRICT}" == "1" ]]; then
+  PY_ARGS+=(--hough-params-strict)
+fi
 if [[ "${WITH_VISUALS}" == "1" ]]; then
   PY_ARGS+=(--with-visuals)
 fi
@@ -408,6 +494,11 @@ if [[ -n "${SCORES_PKL_REF_TO_REF}" ]]; then
 fi
 if [[ -n "${SCORES_PKL_REF_TO_ADJUSTED_PRED}" ]]; then
   echo "[run]   scores_pkl_ref_to_adjusted_pred=${SCORES_PKL_REF_TO_ADJUSTED_PRED}"
+fi
+if [[ -n "${HOUGH_PARAMS_PER_DOCUMENT_JSON}" ]]; then
+  echo "[run]   hough_params_per_document_json=${HOUGH_PARAMS_PER_DOCUMENT_JSON}"
+  echo "[run]   hough_params_selection_mode=${HOUGH_PARAMS_SELECTION_MODE}"
+  echo "[run]   hough_params_strict=${HOUGH_PARAMS_STRICT}"
 fi
 if [[ -n "${OUTPUT_DIR}" ]]; then
   echo "[run]   output_dir=${OUTPUT_DIR}"

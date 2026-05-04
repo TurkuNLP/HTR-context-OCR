@@ -31,7 +31,6 @@ from pipeline.resolve_text_metrics_input_sources import (
 from score_stream_index import build_score_stream_index_cached
 
 
-
 def _cleanup_temp_spools(paths: list[Path | None]) -> None:
     """Best-effort cleanup for temporary JSONL spool files."""
     for path in paths:
@@ -75,14 +74,85 @@ def main() -> None:
         scores_pkl_paths_by_kind=scores_pkl_paths_by_kind,
     )
 
-    selected_items, matched, attempted = build_selected_items(
+    base_selected_items, base_matched, base_attempted = build_selected_items(
         run_items,
         target_fname=args.target_fname,
         max_items=args.max_items,
     )
 
+    selected_items = list(base_selected_items)
+    matched = int(base_matched)
+    attempted = int(base_attempted)
+
+    per_doc_hough_params_by_fname: dict[str, dict[str, int]] | None = None
+    hough_params_meta = {
+        "enabled": False,
+        "json_path": None,
+        "selection_mode": None,
+        "strict": False,
+        "record_count": 0,
+        "doc_count_field": None,
+        "selected_before_count": int(len(base_selected_items)),
+        "selected_after_count": int(len(base_selected_items)),
+        "selected_with_params_count": 0,
+        "selected_missing_params_count": 0,
+        "json_missing_in_run_items_count": 0,
+        "selected_missing_params_sample": [],
+        "json_missing_in_run_items_sample": [],
+    }
+
+    # Lazy import: per-document Hough JSON handling is loaded only when the user
+    # explicitly enables this mode. Default pipeline runs are unaffected.
+    if args.hough_params_per_document_json is not None:
+        from pipeline.load_hough_params_per_document import (
+            apply_hough_params_selection,
+            load_hough_params_per_document_json,
+        )
+
+        loaded_hough_params = load_hough_params_per_document_json(
+            json_path=Path(args.hough_params_per_document_json),
+        )
+        per_doc_hough_params_by_fname = dict(loaded_hough_params["params_by_fname"])
+
+        hough_selection = apply_hough_params_selection(
+            run_items=run_items,
+            selected_items=base_selected_items,
+            params_by_fname=per_doc_hough_params_by_fname,
+            selection_mode=str(args.hough_params_selection_mode),
+            strict=bool(args.hough_params_strict),
+        )
+        selected_items = list(hough_selection["selected_items"])
+
+        matched = int(len(selected_items))
+        attempted = int(len(selected_items))
+
+        hough_params_meta = {
+            "enabled": True,
+            "json_path": str(args.hough_params_per_document_json),
+            "selection_mode": str(args.hough_params_selection_mode),
+            "strict": bool(args.hough_params_strict),
+            "record_count": int(loaded_hough_params["record_count"]),
+            "doc_count_field": loaded_hough_params["doc_count_field"],
+            "selected_before_count": int(len(base_selected_items)),
+            "selected_after_count": int(len(selected_items)),
+            "selected_with_params_count": int(hough_selection["stats"]["selected_with_params_count"]),
+            "selected_missing_params_count": int(hough_selection["stats"]["selected_missing_params_count"]),
+            "json_missing_in_run_items_count": int(hough_selection["stats"]["json_missing_in_run_items_count"]),
+            "selected_missing_params_sample": list(hough_selection["stats"]["selected_missing_params_sample"]),
+            "json_missing_in_run_items_sample": list(hough_selection["stats"]["json_missing_in_run_items_sample"]),
+        }
+
     print(f"[run] workers={int(args.workers)} available_cpus={available_cpus}")
     print(f"[run] matched={matched} attempted={attempted}")
+    if bool(hough_params_meta["enabled"]):
+        print(
+            "[run] hough_params_per_document="
+            f"{hough_params_meta['json_path']} "
+            f"mode={hough_params_meta['selection_mode']} "
+            f"strict={hough_params_meta['strict']} "
+            f"records={hough_params_meta['record_count']} "
+            f"selected_after={hough_params_meta['selected_after_count']}"
+        )
 
     success_spool_unsorted = create_temp_jsonl(args.output_dir, prefix="report_success_unsorted_")
     skipped_spool_unsorted = create_temp_jsonl(args.output_dir, prefix="report_skipped_unsorted_")
@@ -135,6 +205,7 @@ def main() -> None:
                     failed_f=failed_f,
                     timing_f=timing_f,
                     state=state,
+                    per_doc_hough_params_by_fname=per_doc_hough_params_by_fname,
                 )
             finally:
                 if timing_f is not None:
@@ -145,7 +216,9 @@ def main() -> None:
                 f"Internal completion mismatch: completed={state['completed_count']} attempted={attempted}"
             )
 
-        if args.target_fname is not None and matched == 0:
+        # Preserve original target-existence semantics regardless of optional
+        # per-document Hough selection mode.
+        if args.target_fname is not None and int(base_matched) == 0:
             raise KeyError(f"Target file not found in provided input items: {args.target_fname!r}")
 
         success_spool_sorted = create_temp_jsonl(args.output_dir, prefix="report_success_sorted_")
@@ -199,6 +272,18 @@ def main() -> None:
             "available_cpus": int(available_cpus),
             "run_average_normalized_levenshtein_before": avg_before,
             "run_average_normalized_levenshtein_along_lines": avg_along,
+            "hough_params_per_document_json": hough_params_meta["json_path"],
+            "hough_params_selection_mode": hough_params_meta["selection_mode"],
+            "hough_params_strict": bool(hough_params_meta["strict"]),
+            "hough_params_record_count": int(hough_params_meta["record_count"]),
+            "hough_params_doc_count_field": hough_params_meta["doc_count_field"],
+            "hough_params_selected_before_count": int(hough_params_meta["selected_before_count"]),
+            "hough_params_selected_after_count": int(hough_params_meta["selected_after_count"]),
+            "hough_params_selected_with_params_count": int(hough_params_meta["selected_with_params_count"]),
+            "hough_params_selected_missing_params_count": int(hough_params_meta["selected_missing_params_count"]),
+            "hough_params_json_missing_in_run_items_count": int(hough_params_meta["json_missing_in_run_items_count"]),
+            "hough_params_selected_missing_params_sample": list(hough_params_meta["selected_missing_params_sample"]),
+            "hough_params_json_missing_in_run_items_sample": list(hough_params_meta["json_missing_in_run_items_sample"]),
         }
         out_report = args.output_dir / "report.json"
         write_payload_with_items_stream(
@@ -215,6 +300,9 @@ def main() -> None:
             "runfile_json": None if args.runfile_json is None else str(args.runfile_json),
             "scores_pkl_ref_to_pred": None if scores_pkl_paths_by_kind[KIND_REF_TO_PRED] is None else str(scores_pkl_paths_by_kind[KIND_REF_TO_PRED]),
             "workers": int(args.workers),
+            "hough_params_per_document_json": hough_params_meta["json_path"],
+            "hough_params_selection_mode": hough_params_meta["selection_mode"],
+            "hough_params_strict": bool(hough_params_meta["strict"]),
         }
         out_skipped = args.output_dir / "report_skipped_empty_prediction.json"
         write_payload_with_items_stream(
@@ -231,6 +319,9 @@ def main() -> None:
             "runfile_json": None if args.runfile_json is None else str(args.runfile_json),
             "scores_pkl_ref_to_pred": None if scores_pkl_paths_by_kind[KIND_REF_TO_PRED] is None else str(scores_pkl_paths_by_kind[KIND_REF_TO_PRED]),
             "workers": int(args.workers),
+            "hough_params_per_document_json": hough_params_meta["json_path"],
+            "hough_params_selection_mode": hough_params_meta["selection_mode"],
+            "hough_params_strict": bool(hough_params_meta["strict"]),
         }
         out_failed = args.output_dir / "report_failed_items.json"
         write_payload_with_items_stream(
@@ -266,6 +357,10 @@ def main() -> None:
                 "levenshtein_backend": str(args.levenshtein_backend),
                 "workers": int(args.workers),
                 "available_cpus": int(available_cpus),
+                "hough_params_per_document_json": hough_params_meta["json_path"],
+                "hough_params_selection_mode": hough_params_meta["selection_mode"],
+                "hough_params_strict": bool(hough_params_meta["strict"]),
+                "hough_params_record_count": int(hough_params_meta["record_count"]),
             }
             out_timing = args.output_dir / "report_timings.json"
             write_payload_with_items_stream(

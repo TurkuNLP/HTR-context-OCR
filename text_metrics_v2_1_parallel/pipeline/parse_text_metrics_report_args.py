@@ -9,6 +9,13 @@ from pathlib import Path
 from levenshtein_metric import BACKEND_C, SUPPORTED_BACKENDS
 from line_filtering_v2_1_IoU import DEFAULT_MIN_IOU_THRESHOLD
 
+SELECTION_MODE_ALL_SELECTED_DOCS = "all_selected_docs"
+SELECTION_MODE_ONLY_JSON_DOCS = "only_json_docs"
+SUPPORTED_HOUGH_PARAMS_SELECTION_MODES = (
+    SELECTION_MODE_ALL_SELECTED_DOCS,
+    SELECTION_MODE_ONLY_JSON_DOCS,
+)
+
 
 def parse_text_metrics_report_args() -> argparse.Namespace:
     """Parse CLI arguments for the main text-metrics report pipeline."""
@@ -107,6 +114,36 @@ def parse_text_metrics_report_args() -> argparse.Namespace:
         default=DEFAULT_MIN_IOU_THRESHOLD,
         help="Minimum true-IoU threshold used to merge overlapping line coverages in v2.1_true_IoU.",
     )
+
+    p.add_argument(
+        "--hough-params-per-document-json",
+        type=Path,
+        default=None,
+        help=(
+            "Optional path to tuner best_params_per_document.json. "
+            "When set, matching documents use per-document Hough threshold/line_length/line_gap/seed overrides."
+        ),
+    )
+    p.add_argument(
+        "--hough-params-selection-mode",
+        type=str,
+        choices=SUPPORTED_HOUGH_PARAMS_SELECTION_MODES,
+        default=SELECTION_MODE_ONLY_JSON_DOCS,
+        help=(
+            "How to select documents when --hough-params-per-document-json is provided. "
+            "only_json_docs: process only docs listed in JSON. "
+            "all_selected_docs: keep normal selection and override only docs found in JSON."
+        ),
+    )
+    p.add_argument(
+        "--hough-params-strict",
+        action="store_true",
+        help=(
+            "Enable strict consistency checks for --hough-params-per-document-json. "
+            "Fails on JSON/doc selection mismatches instead of falling back silently."
+        ),
+    )
+
     p.add_argument(
         "--levenshtein-backend",
         type=str,
@@ -152,6 +189,13 @@ def validate_text_metrics_report_args(
     for kind, path in scores_pkl_paths_by_kind.items():
         if path is not None and not Path(path).exists():
             raise FileNotFoundError(f"Missing {kind} scores file: {path}")
+
+    if args.hough_params_per_document_json is not None and not Path(args.hough_params_per_document_json).exists():
+        raise FileNotFoundError(
+            f"Missing per-document Hough params JSON: {args.hough_params_per_document_json}"
+        )
+    if args.hough_params_per_document_json is None and bool(args.hough_params_strict):
+        raise ValueError("--hough-params-strict requires --hough-params-per-document-json")
 
     if int(args.window_size) <= 0 or int(args.window_stride) <= 0:
         raise ValueError("window-size and window-stride must be positive")
