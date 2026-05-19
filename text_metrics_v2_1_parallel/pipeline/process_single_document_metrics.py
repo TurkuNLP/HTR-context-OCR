@@ -7,7 +7,7 @@ import time
 from pathlib import Path
 
 from line_alignment_pipeline import detect_and_filter_lines_from_matrix
-from levenshtein_metric import BACKEND_C, compute_levenshtein_metrics_from_bundle
+from levenshtein_metric import LEVENSHTEIN_BACKEND, compute_levenshtein_metrics_from_bundle
 from line_coverage_subtract import (
     build_line_coverage_arrays_from_bundles,
     compute_line_coverage_percentage_metrics_from_arrays,
@@ -251,7 +251,6 @@ def process_item(
         other_text=pred,
         lines_used=lines_used,
         bundle=bundle_ref_to_pred,
-        backend=BACKEND_C,
     )
     _timing_finish(timings, key="levenshtein_metrics_s", start=t0, debug_enabled=debug_enabled)
 
@@ -297,7 +296,7 @@ def process_item(
         "delta": float(after_nls - before_nls),
         "whole_document_normalized_levenshtein_similarity": float(before_nls),
         "document_normalized_levenshtein_similarity_along_lines": along_lines_nls,
-        "levenshtein_backend": BACKEND_C,
+        "levenshtein_backend": LEVENSHTEIN_BACKEND,
         "line_metric_line_count": int(line_metric.get("line_count", 0)),
         "line_metric_lines": line_metric.get("lines", []),
         "line_coverage_metrics": line_coverage_metrics,

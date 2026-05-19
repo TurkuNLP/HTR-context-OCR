@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from levenshtein_metric import LEVENSHTEIN_BACKEND
 from parallelisation.execute_document_tasks import (
     build_worker_args_payload,
     execute_document_tasks,
@@ -266,7 +267,7 @@ def main() -> None:
             "align_abs_min_len": float(args.align_abs_min_len),
             "line_filter_version": "v2_1_true_iou",
             "line_filter_min_iou_threshold": float(args.align_min_iou_threshold),
-            "levenshtein_backend": str(args.levenshtein_backend),
+            "levenshtein_backend": LEVENSHTEIN_BACKEND,
             "debug": bool(args.debug),
             "workers": int(args.workers),
             "available_cpus": int(available_cpus),
@@ -354,7 +355,7 @@ def main() -> None:
                 "hough_start": float(args.hough_start),
                 "align_abs_min_len": float(args.align_abs_min_len),
                 "line_filter_min_iou_threshold": float(args.align_min_iou_threshold),
-                "levenshtein_backend": str(args.levenshtein_backend),
+                "levenshtein_backend": LEVENSHTEIN_BACKEND,
                 "workers": int(args.workers),
                 "available_cpus": int(available_cpus),
                 "hough_params_per_document_json": hough_params_meta["json_path"],

@@ -1,913 +1,385 @@
-# HTR-context-OCR
+<p align="center">
+	<img src="static/churro.png" width="70px" alt="CHURRO Logo" style="display:block;margin:0 auto;" />
+	<p align="center">CHURRO: Making History Readable with an Open-Weight Large Vision-Language Model for High-Accuracy, Low-Cost Historical Text Recognition</p>
+	<p align="center">
+		<a href="https://huggingface.co/stanford-oval/churro-3B" target="_blank"><img src="https://img.shields.io/badge/Model-CHURRO%203B-8A4FFF" alt="Model" /></a>
+		<a href="https://huggingface.co/datasets/stanford-oval/churro-dataset" target="_blank"><img src="https://img.shields.io/badge/Dataset-CHURRO--DS-0A7BBB" alt="Dataset" /></a>
+		<a href="https://arxiv.org/abs/2509.19768" target="_blank"><img src="https://img.shields.io/badge/Paper-arXiv-B31B1B" alt="Paper" /></a>
+		<a href="https://github.com/stanford-oval/churro/stargazers" target="_blank"><img src="https://img.shields.io/github/stars/stanford-oval/churro?style=social" alt="GitHub Stars" /></a>
+	</p>
+</p>
 
-This README documents how to run **every** script in:
+<p align="center">
+	<sub><i>Handwritten and printed text recognition across 22 centuries and 46 language clusters, including historical and dead languages.</i></sub>
+</p>
 
-- `python_scripts/`
-- `shell_scripts/`
+<p align="center">
+		<img src="static/performance_cost.png" alt="Cost vs Performance comparison showing CHURRO's accuracy advantage at significantly lower cost" width="75%" />
+		<br/>
+		<sub><i>Cost vs. accuracy: CHURRO (3B) achieves higher accuracy than much larger commercial and open-weight VLMs while being substantially cheaper.</i></sub>
+</p>
 
-Important note:
-- **Run Python scripts with `python3`** (not `python`).
-- This repo targets **Python ≥ 3.12** (see `pixi.toml` + `pyproject.toml`). Many scripts will not run on older Python.
+---
+## Table of Contents
+1. [Overview](#overview)
+2. [Quick Start](#quick-start)
+3. [Installing the Full Package](#installing-the-full-package)
+  - [System Packages](#system-packages)
+  - [Docker (recommended for local models)](#docker-recommended-for-local-models)
+  - [Environment Setup](#environment-setup)
+  - [Configure Providers](#configure-providers)
+4. [CLI Workflows](#cli-workflows)
+  - [Inference](#inference)
+  - [Preprocess PDFs and Images](#preprocess-pdfs-and-images)
+  - [Benchmark on CHURRO-DS](#benchmark-on-churro-ds)
+  - [LLM Improver](#llm-improver)
+  - [Backup Engines](#backup-engines)
+  - [Local vLLM Container Notes](#local-vllm-container-notes)
+5. [Adding a New OCR System](#adding-a-new-ocr-system)
+6. [HistoricalDocument XML](#historicaldocument-xml)
+  - [Generate HistoricalDocument XML](#generate-historicaldocument-xml)
+7. [Citation](#citation)
+8. [License](#license)
 
 ---
 
-## Conventions
+## Overview
+**CHURRO** is a 3B-parameter open-weight vision-language model (VLM) for historical document transcription. It is trained on **CHURRO-DS**, a curated dataset of ~100K pages from 155 historical collections spanning 22 centuries and 46 language clusters.
 
-Run commands from the repo root (recommended, because many default paths are relative):
+On the CHURRO-DS test set, CHURRO delivers **15.5× lower cost than Gemini 2.5 Pro while exceeding its accuracy**.
 
+## Quick Start
+
+Want a minimal demo? The following will install `transformers` and `torch` only:
 ```bash
-cd /scratch/project_2017385/dorian/HTR-context-OCR
+git clone https://github.com/stanford-oval/churro.git
+cd churro
+curl -fsSL https://pixi.sh/install.sh | bash
+pixi shell -e minimal
 ```
 
-Check your Python:
-
+Then run:
 ```bash
-python3 --version
+python churro_transformers_infer.py tests/churro_dataset_sample_1.jpeg --max-new-tokens 40
 ```
 
-If your checkout path differs from `/scratch/project_2017385/...`:
-- Some scripts contain **hard-coded absolute `/scratch/...` paths**.
-- Update those constants, or search for them:
+Expected output begins with:
+
+```xml
+<HistoricalDocument xmlns="http://example.com/historicaldocument">
+  <Metadata>
+    <Language>German</Language>
+    <WritingDirection>ltr</WritingDirection>
+    <PhysicalDescription
+```
+
+Increase `--max-new-tokens` to `20000` for complete pages.
+
+This minimal path is ideal for quick CPU/GPU trials of the open-weight Churro model. It has lower throughput, and for example, does
+**not** install the CLI tools, and does not support image binarization.
+
+
+## Installing the Full Package
+
+> [!WARNING]
+> This codebase has been tested on Ubuntu 20.04+. Using other operating systems may require tinkering with and troubleshooting system dependencies.
+
+### System Packages
+```bash
+sudo apt-get update && sudo apt-get install -y \
+	libtiff5-dev libjpeg8-dev libopenjp2-7-dev zlib1g-dev libfreetype6-dev \
+	liblcms2-dev libwebp-dev tcl8.6-dev tk8.6-dev python3-tk libharfbuzz-dev \
+	libfribidi-dev libxcb1-dev
+```
+
+### Docker (recommended for local models)
+- Install Docker: https://docs.docker.com/engine/install/
+- GPU users: add the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html).
+- CPU-only machines can still run local models, but expect significantly slower throughput.
+
+### Environment Setup
+We use [Pixi](https://pixi.sh/) to manage Python environments and dependencies. If you are familiar with [Conda](https://docs.conda.io/), you can think of Pixi as a much faster alternative. The following commands set up a Pixi shell with all required packages. Make sure the environment is active before running any Python code.
+```bash
+git clone https://github.com/stanford-oval/churro.git
+cd churro
+curl -fsSL https://pixi.sh/install.sh | bash
+pixi shell  # create and enter the managed environment
+```
+
+Sanity check the install with:
+```bash
+pixi run python -m churro.cli --help
+```
+
+### Configure Providers
+
+Copy the example environment file:
+```bash
+cp .example.env .env
+```
+Populate only the variables you need in `.env`.
+All environment variables live in `.env` and are autoloaded via `python-dotenv`. Use the table below as a quick reference to decide which credentials you must supply.
+
+| Workflow | Required providers | Key variables |
+|----------|-------------------|---------------|
+| Azure Document Intelligence OCR (`--system azure`) or if using `docs-to-images` command without `--no-trim` | Azure Document Intelligence | `AZURE_DI_ENDPOINT`, `AZURE_DOC_KEY` |
+| LLM-based OCR against Vertex AI deployments | Google Vertex AI | `VERTEX_AI_LOCATION` |
+| LLM-based OCR against Azure/OpenAI deployments | Azure OpenAI or OpenAI | `AZURE_API_BASE`, `AZURE_OPENAI_API_KEY` (or `OPENAI_API_KEY`), `AZURE_API_VERSION` |
+| Mistral OCR (`--system mistral_ocr`) | Mistral | `MISTRAL_API_KEY` |
+| Local vLLM models (`--system finetuned` or `llm` with engines backed by `vllm/`) | Docker + Hugging Face | `LOCAL_VLLM_PORT`, `HF_TOKEN` (only if using private models) |
+
+When a workflow does not need a provider, leave the corresponding variables blank. See `.example.env` for full documentation of each field.
+For Vertex AI usage, additionally ensure that the Google Cloud SDK is installed and authenticated: https://cloud.google.com/sdk/docs/install
+
+Note that for all API LLM calls, the outputs are cached in `.litellm_cache/`, so subsequent runs with the same inputs will be much faster and free.
+
+## CLI Workflows
+The unified Typer CLI lives under `churro/cli`. All examples below assume you are inside a `pixi shell` or prefix commands with `pixi run`.
+
+### Inference
+Single image (local CHURRO model hosted via vLLM):
+```bash
+pixi run python -m churro.cli infer \
+	--system finetuned \
+	--engine churro \
+	--image tests/churro_dataset_sample_1.jpeg
+```
+
+`finetuned` system returns HistoricalDocument XML by default; add `--strip-xml` to output plain text instead. See [HistoricalDocument XML](#historicaldocument-xml) for schema details and parsing tips.
+
+Optionally, add `--binarize` to pre-process each page with the bundled neural image binarizer before sending it to OCR. This can improve OCR accuracy on degraded documents.
+The first run downloads the `stanford-oval/eynollah_binarizer_onnx` model.
+
+Batch directory with filtered suffixes and output files:
+```bash
+pixi run python -m churro.cli infer \
+	--system finetuned \
+	--engine churro \
+	--image-dir path/to/images \
+	--suffix png --suffix jpeg \
+	--recursive \
+	--output-dir workdir/texts/ \
+	--skip-existing \
+	--max-concurrency 8
+```
+
+Use `pixi run python -m churro.cli infer --help` to see every option, including how to use other LLMs via `--system llm --engine <engine>` arguments.
+
+### Preprocess PDFs and Images
+If you have raw PDF scans or image directories, first use the `docs-to-images` command to convert them into page-aligned PNGs ready for OCR.
+`docs-to-images` normalizes PDF scans and image directories into page-aligned PNGs. The default engine `gemini-2.5-pro-low` calls a Vertex AI model to detect double-page spreads, then calls Azure Document Intelligence to detect page boundaries and trim margins.
+
+Single PDF:
+```bash
+pixi run python -m churro.cli docs-to-images \
+	--input-file path/to/file.pdf \
+	--output-dir workdir/images/
+```
+
+Mixed directory with custom suffix filters and dry run:
+```bash
+pixi run python -m churro.cli docs-to-images \
+	--input-dir path/to/scans \
+	--suffix pdf --suffix tif --suffix png \
+	--recursive \
+	--output-dir workdir/images/ \
+	--dry-run
+```
+
+Here is how this pipeline works:
+- An LLM estimates whether a rasterized page contains a two-page spread. Provide `--engine <MODEL_MAP key>` to swap to a different splitter if you do not have Vertex AI access.
+- Margin trimming is enabled by default via Azure Document Intelligence. Use `--no-trim` to disable this stage.
+- `--batch-pages`, `--queue-maxsize`, `--raster-workers`, `--page-workers`, and `--llm-concurrency-limit` balance CPU-bound rasterization and LLM throughput.
+- Pages are written as `<source_base>_page_XXXX.png`, even when spreads split into multiple images.
+
+### Benchmark on CHURRO-DS
+Run end-to-end evaluation against the CHURRO dataset. The command automatically initializes any required local vLLM server before processing.
+```bash
+pixi run python -m churro.cli benchmark \
+	--system finetuned \
+	--engine churro \
+	--dataset-split test \
+	--input-size 0 \
+	--max-concurrency 32
+```
+
+Important options:
+- `--system {azure,mistral_ocr,llm,finetuned}` determines which OCR backend to use.
+- `--engine <key>` is required for `llm` and `finetuned` systems; see `churro/utils/llm/models.py` for the full `MODEL_MAP` of logical keys (GPT-4/5, Claude, Gemini, Qwen 2.5, MiniCPM, CHURRO, and more).
+- `--tensor-parallel-size` / `--data-parallel-size` tune vLLM scaling for local engines.
+- `--resize <pixels>` optionally resizes large images before inference.
+
+Optionally, add `--binarize` to pre-process each dataset page with a neural image binarizer before OCR.
+
+Outputs land under `workdir/results/<split>/<system>_<engine>/` (the engine suffix is omitted for `azure` and `mistral_ocr`).
+
+
+### LLM Improver
+The Churro CLI supports optional post-processing with the `LLMImprover`, enabled via `--use-improver`. Pair it with `--improver-engine`. Improver can help fix OCR errors, and improve the formatting of complex documents' Markdown.
+
+### Backup Engines
+You can supply a backup engine for LLM-based OCR systems using `--backup-engine`, and for LLM improvers using `--improver-backup-engine`.
+Both backup options allow the pipeline to retry with a secondary model if the first call fails. For example, when a provider's content filter incorrectly flags historical material or when a transient outage interrupts inference.
+
+
+### Local vLLM Container Notes
+When you run `infer` or `benchmark` with an `llm` or `finetuned` system whose engine has an `hf_repo` entry, the CLI will:
+- Read `LOCAL_VLLM_PORT` and `HF_TOKEN` from your environment (`churro/utils/docker/vllm.py`).
+- Pull the corresponding Hugging Face repository on first launch. Expect multi-gigabyte downloads.
+- Start a Docker container exposing an OpenAI-compatible API at `http://localhost:<LOCAL_VLLM_PORT>/v1`.
+- Stop the container automatically when the command exits or crashes.
+
+Make sure the chosen port is free and that Docker is running. GPU acceleration is optional but dramatically improves throughput.
+
+If you already run vLLM yourself (for example on `localhost:8000`), set:
 
 ```bash
-rg -n "/scratch/" python_scripts shell_scripts
+export USE_EXISTING_VLLM=1
+export LOCAL_VLLM_PORT=8000
+export OPENAI_API_KEY=EMPTY
+```
+
+Then run benchmark without Docker startup:
+
+```bash
+./run_finetuned_benchmark_existing_vllm.sh
+```
+
+## Adding a New OCR System
+Pull requests for new VLMs and OCR backends are welcome.
+
+If adding a new LLM, simply add it to `utils/llm/models.py` (`MODEL_MAP`). Include an `hf_repo` for vLLM-served models.
+
+For entirely new OCR systems, follow all steps:
+1. Register the system in `churro/systems/ocr_factory.py` so the CLI can instantiate it.
+2. Implement `process_image` and `get_system_name` in a subclass of `BaseOCR`.
+3. Use `--system <system_name>` with the CLI or import the factory in your own scripts.
+
+## HistoricalDocument XML
+`HistoricalDocument` is the XML schema we use in the CHURRO dataset and model for rich transcriptions. It is specifically designed to capture complex layouts, scribal edits, and missing text, which are all common in historical documents, while preserving reading order.
+
+Each response contains a root `<HistoricalDocument>` element with optional `<Metadata>` details (languages, scripts, writing direction, notes) followed by one or more `<Page>` blocks. A page combines optional `<Header>` and `<Footer>` regions with a required `<Body>` that nests structural tags such as `<Paragraph>`, `<MarginalNote>`, `<Figure>`, and `<List>`. Inline markup like `<Addition>`, `<Deletion>`, `<Gap/>`, and `<InterlinearNote>` captures scribal edits or missing text while preserving reading order.
+
+```xml
+<HistoricalDocument xmlns="http://example.com/historicaldocument">
+	<Metadata>
+		<Language>lat</Language>
+		<Script>Latn</Script>
+	</Metadata>
+	<Page>
+		<Header/>
+		<Body>
+			<Paragraph>
+				<Line>In nomine domini amen.</Line>
+				<Line><Gap reason="illegible"/> nos notarii subscripsimus.</Line>
+			</Paragraph>
+		</Body>
+	</Page>
+</HistoricalDocument>
+```
+
+The complete definition lives in `churro/evaluation/historical_doc.xsd`. The inference CLI's `--strip-xml` flag and the evaluation helpers call `churro.evaluation.xml_utils.extract_actual_text_from_xml()` to remove all XML tags and flatten the content into plain text when you do not need the markup.
+
+### Generate HistoricalDocument XML
+If you are adding a new dataset to Churro, you may want to convert your transcriptions to the `HistoricalDocument` XML format.
+Convert a directory full of PNG/TXT pairs into `HistoricalDocument` XML using this CLI tool. This conversion uses an LLM prompt to structure the text according to the schema.
+
+```bash
+pixi run python -m churro.cli text-to-historical-doc-xml \
+	path/to/pairs/dir \
+	--corpus-description "Basque newspaper corpus" \
+	--max-concurrency 8
+```
+
+Place your data in matched `X.png` and `X.txt` files within the input directory; each pair yields an `X.xml`. The tool:
+- Validates LLM output against `historical_doc.xsd` and prettifies XML prior to saving.
+- Skips files that already have XML unless you pass `--overwrite`.
+- Accepts any logical engine key from `MODEL_MAP` via `--engine` (defaults to `gemini-2.5-pro-medium`).
+- Adds optional corpus context to prompts through `--corpus-description`.
+
+---
+
+## Citation
+If you use CHURRO or CHURRO-DS, please cite:
+
+```bibtex
+@inproceedings{semnani2025churro,
+	title        = {{CHURRO}: Making History Readable with an Open-Weight Large Vision-Language Model for High-Accuracy, Low-Cost Historical Text Recognition},
+	author       = {Semnani, Sina J. and Zhang, Han and He, Xinyan and Tekg{"u}rler, Merve and Lam, Monica S.},
+	booktitle    = {Proceedings of the 2025 Conference on Empirical Methods in Natural Language Processing (EMNLP 2025)},
+	year         = {2025}
+}
 ```
 
 ---
 
-## Common File Types Used Across Scripts
+## License
+- Model Weights: Qwen research license (see HF model card)
+- Dataset: Due to licensing restrictions on the original datasets used in Churro, use is permitted for research purposes only.
+- Code: Apache 2.0
 
-You’ll see these files referenced repeatedly:
+## Standalone Dataset Inference And Evaluation (`tests/custom_churro_infer.py`)
+This repository includes a standalone script at `tests/custom_churro_infer.py` that runs Churro over the Hugging Face dataset without using `churro.cli`, Docker orchestration, or pixi shell orchestration.
 
-### `outputs.json` (inference runfile)
-A JSON list of per-image inference results (typically produced by a Churro evaluation pipeline). Many scripts expect fields like:
-- `file_name`
-- `normalized_gold_text`
-- `normalized_predicted_text`
+### What It Does
+- Loads dataset examples from `stanford-oval/churro-dataset` (or a dataset you pass via flag) using streaming.
+- Supports two inference backends:
+  - `transformers`: local model inference with `AutoModelForImageTextToText`.
+  - `vllm`: OpenAI-compatible HTTP calls to an already-running vLLM endpoint (e.g. `http://localhost:8000/v1`).
+- Writes one markdown file per processed sample under `responses/<split>/`.
+- Reuses repository evaluation modules:
+  - `evaluation/metrics.py`
+  - `evaluation/normalization.py`
+  - `evaluation/repetition.py`
+- Produces benchmark-style metrics artifacts per split under:
+  - `results/custom_churro_infer/<backend>/<split>/outputs.json`
+  - `results/custom_churro_infer/<backend>/<split>/all_metrics.json`
 
-### `scores.pkl` (pickle stream; NOT one big list)
-Produced by `python_scripts/compare.py`. It is a **pickle stream** (many sequential `pickle.dump(...)` calls), so downstream scripts read it using repeated `pickle.load(...)` until EOF.
+### Evaluation Output Format
+The script uses `evaluation.metrics.compute_metrics(...)`, so it preserves the repository output schema:
+- `main_language_metrics`
+- `type_metrics`
+- `aggregate_metrics`
+- `main_language_and_type_metrics`
 
-Each record typically contains:
-- `fname` (basename of the image file)
-- `scores` (chrF matrix)
-- `ref` (gold text)
-- `pred` (predicted text)
+The only intentional post-processing change is for `main_language_and_type_metrics` key order:
+- first all `<language>_print` keys sorted alphabetically by language,
+- then all `<language>_handwriting` keys sorted alphabetically by language.
 
-### `endpoints.pkl` (pickle stream of Hough endpoints)
-Produced by `python_scripts/hough_line_transform_endpoints_no_angle_all.py`. Stores per-item merged line segments so alignment can reuse them.
+### Flags
+Run `python3.12 tests/custom_churro_infer.py --help` for the current source of truth.
 
-### `*_adjusted_pred.txt` (aligned predictions)
-Produced by `python_scripts/align_graph_text_blocks_all.py` (and some smaller target-only aligners). These are used by `python_scripts/compare_aligned_texts.py`.
+Supported flags:
+- `--backend {transformers,vllm}`: inference backend (default: `transformers`)
+- `--dataset-id <str>`: HF dataset id (default: `stanford-oval/churro-dataset`)
+- `--dataset-split {all,dev,test}`: split selector (default: `all`)
+- `--max-samples-per-split <int>`: cap examples per split (default: `0` = no cap)
+- `--model-id <str>`: HF model id for transformers backend (default: `stanford-oval/churro-3B`)
+- `--system-message <str>`: prompt passed to the model
+- `--max-new-tokens <int>`: generation token limit per sample
+- `--temperature <float>`: generation temperature
+- `--device {auto,cpu,cuda}`: transformers backend device selection
+- `--vllm-base-url <str>`: vLLM base URL (default: `http://localhost:8000/v1`)
+- `--vllm-model <str>`: served model name at vLLM (default: `churro`)
+- `--vllm-api-key <str>`: API key for vLLM endpoint (default from `OPENAI_API_KEY` or `EMPTY`)
+- `--vllm-timeout-seconds <int>`: request timeout for vLLM calls
+- `--output-dir <path>`: per-sample markdown output root (default: `responses/`)
+- `--metrics-output-root <path>`: root for `outputs.json` and `all_metrics.json` (default: `results/custom_churro_infer/`)
+- `--skip-existing`: skip samples whose per-sample markdown output already exists
 
----
-
-## Pipeline Overview (Recommended “All-in-one” Alignment Pipeline)
-
-If you have:
-- an image directory (`--img-dir`)
-- an inference runfile `outputs.json` (`--runfile-json`)
-
-…the shell wrapper `shell_scripts/run_evaluation_improvement.sh` runs this full pipeline:
-
-1. `compare.py` → creates `scores.pkl`
-2. `visualise_dorian_dense_matrices_style_no_angle_all.py` → dense-matrices visualisations
-3. `hough_line_transform_endpoints_no_angle_all.py` → creates `endpoints.pkl`
-4. `align_graph_text_blocks_all.py` → writes aligned `*_adjusted_pred.txt` + reports
-5. `compare_aligned_texts.py` → creates aligned-score `scores_aligned.pkl`
-6. `visualise_scores_heatmap_only.py` → heatmaps for aligned score matrices
-
-See the `shell_scripts/run_evaluation_improvement.sh` section below for details.
-
----
-
-# Python Scripts (`python_scripts/`)
-
-> All commands in this section are run using `python3`.
-
----
-
-## `python_scripts/align_graph_text_blocks.py`
-
-Purpose:
-- Align prediction text blocks for a **fixed list of target cases** using line endpoints detected from chrF score matrices.
-
-How to run:
+### Run Examples
+Transformers backend:
 ```bash
-python3 python_scripts/align_graph_text_blocks.py
+python3.12 tests/custom_churro_infer.py --backend transformers --dataset-split dev
 ```
 
-Configuration (NO CLI flags):
-- This script is configured via **in-file constants**, including:
-  - `PROJECT_ROOT` (currently hard-coded)
-  - `SCORES_PKL` (input score matrix stream)
-  - `IMG_DIR` (directory containing images; used for some visual checks)
-  - `TARGET_GRAPHS` (which cases to process)
-  - `WINDOW_SIZE`, `WINDOW_STRIDE` (must match what was used to generate `scores.pkl`)
-  - `OUTPUT_DIR` (where outputs are written)
-- Optional environment:
-  - `ALLOW_MISSING=1` to skip missing targets rather than raising.
-
-Inputs:
-- `scores.pkl` produced by `python_scripts/compare.py`
-
-Outputs (under `OUTPUT_DIR`):
-- `<target>_adjusted_pred.txt`
-- `<target>_alignment_report.json`
-- `summary.json`
-
-Notes / gotchas:
-- This script contains absolute paths; it’s best treated as an experiment script.
-- For batch processing across **all** cases using CLI flags, prefer `align_graph_text_blocks_all.py`.
-
----
-
-## `python_scripts/align_graph_text_blocks_all.py`
-
-Purpose:
-- Align prediction text blocks for **all** cases in a `scores.pkl` stream, using precomputed Hough endpoints from an `endpoints.pkl` stream.
-
-How to run (example):
+vLLM backend (server already running):
 ```bash
-python3 python_scripts/align_graph_text_blocks_all.py \
-  --scores-pkl /path/to/scores.pkl \
-  --endpoints-pkl /path/to/endpoints.pkl \
-  --output-dir /path/to/aligned_outputs \
-  --window-size 100 \
-  --window-stride 50
+vllm serve stanford-oval/churro-3B --served-model-name churro --max_model_len=125000
+python3.12 tests/custom_churro_infer.py --backend vllm --vllm-base-url http://localhost:8000/v1 --vllm-model churro --vllm-api-key EMPTY --dataset-split dev
 ```
 
-Flags (all CLI flags):
-- `--scores-pkl` (required): Path to compare output `scores.pkl` (pickle stream).
-- `--endpoints-pkl` (required): Path to endpoint records (pickle stream) from `hough_line_transform_endpoints_no_angle_all.py`.
-- `--output-dir` (required): Directory for writing aligned text + JSON reports.
-- `--window-size` (default: `100`): Must match the compare window size used upstream (kept for metadata).
-- `--window-stride` (default: `50`): **Used** for overlap-aware reassembly; must match compare stride.
-- `--max-items` (default: unset): Stop after N items.
-- `--visualise-full-dir` (optional): If provided, stored in reports as a cross-reference path.
-- `--visualise-graph-dir` (optional): Same idea.
-- `--visualise-mask-dir` (optional): Same idea.
-
-Inputs:
-- `scores.pkl` (from `compare.py`)
-- `endpoints.pkl` (from `hough_line_transform_endpoints_no_angle_all.py`)
-
-Outputs (under `--output-dir`):
-- For each index `i` (0-based), using a stable prefix:
-  - `0000_<safe_name>_adjusted_pred.txt`
-  - `0000_<safe_name>_alignment_report.json`
-- Summary:
-  - `summary.json`
-
-Notes / gotchas:
-- If the endpoint stream does not contain a record for every `fname` in `scores.pkl`, this script errors.
-- The script expects endpoint records keyed by the exact `fname` stored in the `scores.pkl` records.
-
----
-
-## `python_scripts/align_two_graph_text_blocks.py`
-
-Purpose:
-- Align prediction text blocks for a **small list of target “graph” cases** using merged lines detected from chrF matrices.
-
-How to run:
+Full dataset with resume behavior:
 ```bash
-python3 python_scripts/align_two_graph_text_blocks.py
-```
-
-Configuration (NO CLI flags):
-- Configure via in-file constants:
-  - `PROJECT_ROOT`
-  - `SCORES_PKL`
-  - `TARGET_GRAPHS`
-  - `WINDOW_SIZE`, `WINDOW_STRIDE`
-  - `OUTPUT_DIR`
-
-Inputs:
-- `scores.pkl` produced by `python_scripts/compare.py`
-
-Outputs:
-- Under `results/aligned_text_blocks_two_cases/` (relative to `PROJECT_ROOT`):
-  - `<target>_adjusted_pred.txt`
-  - `<target>_alignment_report.json`
-  - `summary.json`
-
----
-
-## `python_scripts/churchbook_churro_infer.py`
-
-Purpose:
-- Run OCR on a **local folder of churchbook images** and write markdown outputs (XML + extracted plain text).
-
-How to run (vLLM backend example):
-```bash
-python3 python_scripts/churchbook_churro_infer.py \
-  --backend vllm \
-  --input-dir /scratch/project_2017385/dorian/Churro_churchbooks/churchbook_images \
-  --output-root /scratch/project_2017385/dorian/Churro_churchbooks/results/churchbook_results \
-  --model-id stanford-oval/churro-3B \
-  --system-message "Transcribe the entiretly of this historical documents to XML format." \
-  --max-new-tokens 20000 \
-  --temperature 0.6 \
-  --device auto \
-  --vllm-base-url http://localhost:8000/v1 \
-  --vllm-model churro \
-  --vllm-api-key "${OPENAI_API_KEY:-EMPTY}" \
-  --vllm-timeout-seconds 600 \
-  --max-concurrency 1 \
-  --max-images 0 \
-  --skip-existing
-```
-
-Flags (high level):
-- `--backend`: `transformers` or `vllm`
-- `--input-dir`: image directory
-- `--output-root`: output root directory
-- `--model-id`, `--system-message`, `--max-new-tokens`, `--temperature`, `--device`
-- vLLM options: `--vllm-base-url`, `--vllm-model`, `--vllm-api-key`, `--vllm-timeout-seconds`, `--max-concurrency`
-- controls: `--max-images`, `--skip-existing`
-
-Outputs (under `--output-root`):
-- `xml_results/<image_stem>_xml.md`
-- `_pure_text_results/<image_stem>_pure_text.md`
-
----
-
-## `python_scripts/compare.py`
-
-Purpose:
-- Sliding-window chrF comparison between gold and predicted text from an inference runfile (`outputs.json`).
-- Produces a **pickle stream** `scores.pkl` used by visualisers and aligners.
-
-How to run:
-```bash
-python3 python_scripts/compare.py \
-  --window-size 100 \
-  --window-stride 50 \
-  --runfile-json /path/to/outputs.json \
-  --output /path/to/scores.pkl
-```
-
-Flags (all CLI flags):
-- `--window-size` (default: `100`)
-- `--window-stride` (default: `50`)
-- `--runfile-json` (default is a relative path; run from repo root if relying on defaults)
-- `--output` (default: `scores.pkl`)
-- `--max-items` (optional): process only first N entries
-
-Outputs:
-- `scores.pkl` (pickle stream) containing records like:
-  - `{fname, scores, ref, pred}`
-
-Notes:
-- Downstream scripts expect `fname` to be the image basename (compare uses `os.path.basename(file_name)`).
-
----
-
-## `python_scripts/compare_aligned_texts.py`
-
-Purpose:
-- Recompute chrF matrices by comparing the **gold text** in `outputs.json` to the **aligned predictions** stored in `*_adjusted_pred.txt` files.
-
-How to run:
-```bash
-python3 python_scripts/compare_aligned_texts.py \
-  --runfile-json /path/to/outputs.json \
-  --aligned-dir /path/to/alignment_outputs \
-  --txt-glob "*_adjusted_pred.txt" \
-  --output /path/to/scores_aligned.pkl \
-  --window-size 100 \
-  --window-stride 50
-```
-
-Flags (all CLI flags):
-- `--window-size` (default: `100`)
-- `--window-stride` (default: `50`)
-- `--runfile-json` (default relative path)
-- `--aligned-dir` (default is an absolute path; override it)
-- `--txt-glob` (default: `*_adjusted_pred.txt`)
-- `--output` (default: `aligned_scores.pkl`)
-- `--allow-missing` (optional): skip aligned txts that don’t match a runfile entry
-
-Inputs:
-- `outputs.json` runfile
-- aligned text files produced by `align_graph_text_blocks_all.py` or similar
-
-Outputs:
-- `aligned_scores.pkl` (pickle stream) with records including:
-  - `fname` (original image name)
-  - `aligned_txt` (path)
-  - `scores`, `ref`, `pred`
-
-Notes / gotchas:
-- This script maps aligned-txt names back to runfile entries using a safe-name key; if naming differs, use `--allow-missing` and inspect warnings.
-
----
-
-## `python_scripts/custom_python_script.py`
-
-Purpose:
-- A custom entrypoint that delegates to `churro.cli.main.main`.
-- Designed to be used like:
-  - `python3 -m custom_python_script benchmark ...`
-
-How to run (module-style):
-```bash
-python3 -m custom_python_script --help
-```
-
-Benchmark example:
-```bash
-python3 -m custom_python_script benchmark \
-  --system finetuned \
-  --engine churro \
-  --dataset-split test \
-  --input-size 0 \
-  --max-concurrency 4
-```
-
-Notes:
-- This module is typically invoked by `shell_scripts/run_finetuned_benchmark_existing_vllm.sh`.
-- For `python3 -m custom_python_script ...` to work, your environment must be able to import `custom_python_script` as a module.
-  (In many setups this is handled externally by environment configuration or wrapper scripts.)
-
----
-
-## `python_scripts/download_churro_finnish.py`
-
-Purpose:
-- Stream `stanford-oval/churro-dataset` and export Finnish samples to disk.
-
-How to run:
-```bash
-python3 python_scripts/download_churro_finnish.py
-```
-
-Configuration (NO CLI flags):
-- Edit in-file constants if needed:
-  - `DATASET_ID`
-  - `SPLITS`
-  - `LANGUAGE_FILTER`
-  - `OUTPUT_ROOT`
-
-Outputs (under `OUTPUT_ROOT/<split>/`):
-- saved images (filename derived from dataset `file_name`)
-- `<image_stem>_fields.md` (metadata dump)
-- `manifest.jsonl` (one record per saved sample)
-- `OUTPUT_ROOT/summary.json`
-
----
-
-## `python_scripts/finnish_custom_churro_infer.py`
-
-Purpose:
-- Run inference on the HF Churro dataset, filter to Finnish, and write:
-  - markdown outputs per sample
-  - benchmark-style metrics outputs (`outputs.json`, `all_metrics.json`)
-
-How to run (vLLM example):
-```bash
-python3 python_scripts/finnish_custom_churro_infer.py \
-  --backend vllm \
-  --dataset-id stanford-oval/churro-dataset \
-  --dataset-split all \
-  --max-samples-per-split 0 \
-  --model-id stanford-oval/churro-3B \
-  --system-message "Transcribe the entiretly of this historical documents to XML format." \
-  --max-new-tokens 20000 \
-  --temperature 0.6 \
-  --device auto \
-  --vllm-base-url http://localhost:8000/v1 \
-  --vllm-model churro \
-  --vllm-api-key "${OPENAI_API_KEY:-EMPTY}" \
-  --vllm-timeout-seconds 600 \
-  --max-concurrency 1 \
-  --output-dir /scratch/project_2017385/dorian/HTR-context-OCR/responses \
-  --metrics-output-root /scratch/project_2017385/dorian/HTR-context-OCR/responses \
-  --skip-existing
-```
-
-Flags (summary):
-- backend + model:
-  - `--backend` (`transformers` or `vllm`)
-  - `--model-id` (transformers backend)
-- dataset:
-  - `--dataset-id`
-  - `--dataset-split` (split name or `all`)
-  - `--max-samples-per-split`
-- generation:
-  - `--system-message`
-  - `--max-new-tokens`
-  - `--temperature`
-  - `--device`
-- vLLM:
-  - `--vllm-base-url`, `--vllm-model`, `--vllm-api-key`, `--vllm-timeout-seconds`
-  - `--max-concurrency`
-- outputs:
-  - `--output-dir`
-  - `--metrics-output-root`
-  - `--skip-existing`
-
-Outputs:
-- Markdown:
-  - `<output_dir>/<split>/model_results/<index>_<name>.md`
-  - `<output_dir>/<split>/gold/gold_<name>.md`
-- Metrics:
-  - `<metrics_output_root>/<backend>/<split>/outputs.json`
-  - `<metrics_output_root>/<backend>/<split>/all_metrics.json`
-
-Tip:
-- For a fully wrapped vLLM + repeat-run workflow, see `shell_scripts/run_finnish_custom_churro_infer_existing_vllm.sh`.
-
----
-
-## `python_scripts/hough_line_transform_endpoints_no_angle_all.py`
-
-Purpose:
-- Read `scores.pkl` (pickle stream), run dense-matrices style detection, and write ONLY merged line endpoints (pickle stream).
-- Intended to be used before `align_graph_text_blocks_all.py`.
-
-How to run:
-```bash
-python3 python_scripts/hough_line_transform_endpoints_no_angle_all.py \
-  --scores-pkl /path/to/scores.pkl \
-  --output /path/to/endpoints.pkl
-```
-
-Flags (all CLI flags):
-- `--scores-pkl` (required): input `scores.pkl` pickle stream
-- `--output` (required): output endpoint pickle stream
-- `--max-items` (optional): limit processed items
-
-Outputs:
-- `endpoints.pkl` (pickle stream), each record includes:
-  - `fname`
-  - `threshold_start`
-  - `merged_lines`
-  - `raw_line_count`, `selected_line_count`, `merged_line_count`
-
----
-
-## `python_scripts/plot_custom_churro_run_metrics.py`
-
-Purpose:
-- Discover run folders and plot summaries + heatmaps from `all_metrics.json`.
-
-How to run:
-```bash
-python3 python_scripts/plot_custom_churro_run_metrics.py
-```
-
-Configuration (NO CLI flags):
-- Edit these constants near the bottom of the file:
-  - `SEARCH_ROOTS` (defaults to `[Path.cwd()]`)
-  - `SAVE_FIGURES` (`False` by default)
-  - `FIGURE_OUTPUT_DIR` (default: `results/plots/custom_churro_runs`)
-
-Outputs:
-- Prints run summary table to stdout.
-- If `SAVE_FIGURES=True`, writes PNGs into `FIGURE_OUTPUT_DIR`.
-
----
-
-## `python_scripts/single_finetuned_vllm_infer.py`
-
-Purpose:
-- Run a single image request against a local vLLM OpenAI-compatible endpoint and write a markdown report.
-
-How to run (example):
-```bash
-python3 python_scripts/single_finetuned_vllm_infer.py \
-  --image /scratch/project_2017385/dorian/Churro_copy/tests/churro_dataset_sample_1.jpeg \
-  --engine churro \
-  --system-message "..." \
-  --timeout-seconds 600 \
-  --local-vllm-port 8000 \
-  --openai-api-key "${OPENAI_API_KEY:-EMPTY}" \
-  --output-dir /scratch/project_2017385/dorian/HTR-context-OCR/responses \
-  --output-file /scratch/project_2017385/dorian/HTR-context-OCR/responses/single_finetuned_vllm.md \
-  --strip-xml
-```
-
-Flags (summary):
-- input: `--image`
-- model selection: `--engine`
-- request: `--system-message`, `--timeout-seconds`, `--local-vllm-port`, `--openai-api-key`
-- outputs: `--output-dir`, `--output-file`
-- processing: `--strip-xml`
-
-Output:
-- Markdown at `--output-file` (or under `--output-dir` if `--output-file` omitted)
-
----
-
-## `python_scripts/visualise_dorian_component_fit_no_hough_churro30.py`
-
-Purpose:
-- Visualize chrF matrices using a “component fit” approach (no Hough transform).
-
-How to run:
-```bash
-VIZ_NOTEBOOK_OUTPUT=1 python3 python_scripts/visualise_dorian_component_fit_no_hough_churro30.py
-```
-
-Configuration (NO CLI flags):
-- Controlled via in-file constants (paths + output dirs).
-- Notebook/text-pane output is controlled via:
-  - `VIZ_NOTEBOOK_OUTPUT=1` (default)
-  - `VIZ_NOTEBOOK_OUTPUT=0` for headless runs
-
-Outputs:
-- Writes figures under its configured `RESULTS_DIR` (see constants in file)
-
----
-
-## `python_scripts/visualise_dorian_component_fit_no_hough_churro30_v2.py`
-
-Purpose:
-- Same as v1, with improved handling for small matrices.
-
-How to run:
-```bash
-VIZ_NOTEBOOK_OUTPUT=1 python3 python_scripts/visualise_dorian_component_fit_no_hough_churro30_v2.py
-```
-
-Configuration:
-- Same pattern as v1 (`VIZ_NOTEBOOK_OUTPUT` + in-file constants)
-
-Outputs:
-- Writes figures under its configured `RESULTS_DIR`
-
----
-
-## `python_scripts/visualise_dorian_dense_matrices_style_no_angle_all.py`
-
-Purpose:
-- Visualise chrF score matrices and overlay merged Hough lines (dense-matrices style, no angle filtering) for **all** cases in a `scores.pkl` stream.
-
-How to run (example):
-```bash
-python3 python_scripts/visualise_dorian_dense_matrices_style_no_angle_all.py \
-  --img-dir /scratch/project_2017385/dorian/churro_finnish_dataset/dataset_splits/dev \
-  --scores-pkl /path/to/scores.pkl \
-  --results-dir /path/to/visualise_outputs \
-  --max-items 50
-```
-
-Flags (all CLI flags):
-- `--img-dir`: directory containing images (looked up by `fname` from `scores.pkl`)
-- `--scores-pkl`: input `scores.pkl` (pickle stream)
-- `--results-dir`: output directory
-- `--max-items`: optional limit
-- `--render-notebook-output`: render extra output using IPython (only if available)
-- `--show`: call `plt.show()` per item (usually for notebooks)
-
-Outputs (under `--results-dir`):
-- `full_figures/`
-- `graph_only/`
-- `detection_masks/`
-
----
-
-## `python_scripts/visualise_dorian_dense_matrices_style_single_no_angle.py`
-
-Purpose:
-- Dense-matrices style detection + visualisation for **one** target case.
-
-How to run:
-```bash
-python3 python_scripts/visualise_dorian_dense_matrices_style_single_no_angle.py
-```
-
-Configuration (NO CLI flags):
-- Edit in-file constants:
-  - `IMG_DIR`, `PROJECT_ROOT`, `SCORES_PKL`
-  - `RESULTS_DIR` (+ its subdirectories)
-  - `TARGET_NAME`
-  - `RENDER_NOTEBOOK_OUTPUT`
-
-Outputs:
-- Writes PNGs under the configured `RESULTS_DIR`
-
----
-
-## `python_scripts/visualise_dorian_simple.py`
-
-Purpose:
-- Experimental visualiser with extra intermediate masks.
-
-How to run:
-```bash
-VIZ_NOTEBOOK_OUTPUT=1 VIZ_SAVE_OUTPUTS=1 python3 python_scripts/visualise_dorian_simple.py
-```
-
-Configuration:
-- Controlled by in-file constants + env vars:
-  - `VIZ_NOTEBOOK_OUTPUT=1|0`
-  - `VIZ_SAVE_OUTPUTS=1|0`
-
-Outputs:
-- When `VIZ_SAVE_OUTPUTS=1`, saves figures under its configured output folder.
-
----
-
-## `python_scripts/visualise_scores_heatmap_only.py`
-
-Purpose:
-- Render score matrices from a `scores.pkl` pickle stream as simple heatmaps (NO line detection).
-- Intended for visualising aligned score matrices produced by `compare_aligned_texts.py`, but can also be used on original `scores.pkl`.
-
-How to run:
-```bash
-python3 python_scripts/visualise_scores_heatmap_only.py \
-  --img-dir /scratch/project_2017385/dorian/churro_finnish_dataset/dataset_splits/dev \
-  --scores-pkl /path/to/scores_aligned.pkl \
-  --results-dir /path/to/heatmap_outputs \
-  --max-items 50
-```
-
-Flags (all CLI flags):
-- `--img-dir` (optional, but recommended)
-- `--scores-pkl` (required): pickle stream of `{fname, scores, ...}`
-- `--results-dir` (optional): output directory
-- `--max-items` (optional): limit processed items
-- `--show` (optional): show figures interactively
-
-Outputs (under `--results-dir`):
-- `full_figures/`
-- `graph_only/`
-
----
-
-## `python_scripts/visualise_xmls.py`
-
-Purpose:
-- Render XML payloads embedded in markdown files into standalone HTML pages.
-
-How to run (example):
-```bash
-python3 python_scripts/visualise_xmls.py \
-  --results-dir /scratch/project_2017385/dorian/Churro_churchbooks/results/churchbook_results/xml_results \
-  --output-dir /scratch/project_2017385/dorian/Churro_churchbooks/results/churchbook_results/xml_html_renders \
-  --limit 0 \
-  --stylesheet /scratch/project_2017385/dorian/HTR-context-OCR/python_scripts/visualise_xmls.css \
-  --images-dir /scratch/project_2017385/dorian/Churro_churchbooks/churchbook_images \
-  --copy-images-into-output
-```
-
-Key flags:
-- `--results-dir`: input markdown folder
-- `--output-dir`: output HTML folder
-- `--limit`: number of files (0 = all)
-- `--stylesheet`: CSS file path
-- `--images-dir`: optional image directory for linking
-- `--copy-images-into-output`: copy images into output folder
-
-Outputs:
-- One HTML per markdown file + `index.html` in `--output-dir`
-
----
-
-## `python_scripts/visualise_xmls.css`
-
-Purpose:
-- Stylesheet used by `visualise_xmls.py`
-- Not executable
-
----
-
-## Jupyter notebooks (listed; not fully documented here)
-
-- `python_scripts/custom_churro_run_metrics_analysis.ipynb`
-- `python_scripts/visualise_dorian.ipynb`
-
----
-
-# Shell Scripts (`shell_scripts/`)
-
-Notes:
-- These scripts include `#SBATCH ...` directives and can be run via:
-  - `sbatch shell_scripts/<script>.sh ...` (recommended on CSC/HPC)
-  - `bash shell_scripts/<script>.sh ...` (manual run; `#SBATCH` lines are ignored)
-- Some scripts use `module load ...` and assume an HPC module environment.
-
----
-
-## `shell_scripts/run_compare.sh`
-
-Purpose:
-- Wrapper for `python_scripts/compare.py`
-
-How to run:
-```bash
-bash shell_scripts/run_compare.sh \
-  --runfile-json /path/to/outputs.json \
-  --output /path/to/scores.pkl \
-  --window-size 100 \
-  --window-stride 50
-```
-
-Flags:
-- `--runfile-json`
-- `--output`
-- `--window-size`
-- `--window-stride`
-- `-h`, `--help`
-
-Environment overrides:
-- `RUNFILE_JSON`, `OUTPUT`, `WINDOW_SIZE`, `WINDOW_STRIDE`
-
-Notes:
-- This script calls `module purge/load ...` unconditionally; on systems without `module`, run it on the cluster or remove/guard those lines.
-
----
-
-## `shell_scripts/run_custom_churro_infer_existing_vllm.sh`
-
-Purpose:
-- Start local vLLM, wait for readiness, then run a custom inference script repeatedly.
-
-How to run (example):
-```bash
-bash shell_scripts/run_custom_churro_infer_existing_vllm.sh \
-  --metrics-output-root /scratch/project_2017385/dorian/Churro_copy/results/custom_churro_infer_run1 \
-  --output-dir /scratch/project_2017385/dorian/Churro_copy/responses \
-  --max-concurrency 32 \
-  --vllm-timeout-seconds 3600 \
-  --max-new-tokens 22000 \
-  --dataset-split test \
-  --max-model-len 125000 \
-  --repeat-count 1 \
-  --gpu-memory-utilization 0.3
-```
-
-Important path note:
-- This script currently calls:
-  - `python3 /scratch/project_2017385/dorian/HTR-context-OCR/tests/custom_churro_infer.py`
-- That file does **not** exist in this repo. To run this script you must update that path to a real `custom_churro_infer.py` entrypoint (for example one in a sibling repository).
-
-Flags:
-- `--metrics-output-root`
-- `--output-dir`
-- `--max-concurrency`
-- `--vllm-timeout-seconds`
-- `--max-new-tokens`
-- `--dataset-split` (`all|dev|test`)
-- `--max-model-len`
-- `--repeat-count`
-- `--gpu-memory-utilization`
-- `-h`, `--help`
-
----
-
-## `shell_scripts/run_evaluation_improvement.sh`
-
-Purpose:
-- Run a full evaluation/alignment/visualisation pipeline in one command.
-
-How to run:
-```bash
-bash shell_scripts/run_evaluation_improvement.sh \
-  --img-dir /path/to/images \
-  --runfile-json /path/to/outputs.json \
-  --project-root-results /path/to/results_root \
-  --window-size 100 \
-  --window-stride 50 \
-  --max-items 100
-```
-
-Required flags:
-- `--img-dir`: directory containing the document images (filenames must match `fname` from `scores.pkl`)
-- `--runfile-json`: path to `outputs.json`
-
-Optional flags:
-- `--project-root-results`: root output directory for the entire pipeline
-- `--window-size`: chrF compare window
-- `--window-stride`: chrF compare stride
-- `--max-items`: cap number of items for all stages
-
-Outputs:
-- A run directory is created under:
-  - `<project-root-results>/window_<WINDOW_SIZE>_stride_<WINDOW_STRIDE>/<timestamp>/`
-- Inside that directory:
-  - `compare/scores.pkl`
-  - `visualise_dorian_dense_matrices_style_no_angle_all/...`
-  - `hough_endpoints/endpoints.pkl`
-  - `align_graph_text_blocks_all/...`
-  - `compare_aligned/scores_aligned.pkl`
-  - `aligned_graphs/...`
-
-Notes:
-- This script attempts to find the `HTR-context-OCR` repo root automatically so it can run the python scripts regardless of Slurm `--chdir`.
-
----
-
-## `shell_scripts/run_finetuned_benchmark_existing_vllm.sh`
-
-Purpose:
-- Start local vLLM and run the finetuned benchmark via:
-  - `python3 -m custom_python_script benchmark ...`
-
-How to run (configured via environment variables):
-```bash
-ENGINE=churro \
-DATASET_SPLIT=test \
-INPUT_SIZE=0 \
-MAX_CONCURRENCY=4 \
-MODEL_REPO=stanford-oval/churro-3B \
-MAX_MODEL_LEN=125000 \
-WAIT_SECONDS=1200 \
-SLEEP_SECONDS=2 \
-bash shell_scripts/run_finetuned_benchmark_existing_vllm.sh
-```
-
-Environment options:
-- `ENGINE`
-- `DATASET_SPLIT`
-- `INPUT_SIZE`
-- `MAX_CONCURRENCY`
-- `MODEL_REPO`
-- `MAX_MODEL_LEN`
-- `WAIT_SECONDS`
-- `SLEEP_SECONDS`
-
-Notes:
-- Requires `vllm` available in PATH.
-- Uses `SLURM_JOB_ID` when available to name log files.
-
----
-
-## `shell_scripts/run_finnish_custom_churro_infer_existing_vllm.sh`
-
-Purpose:
-- Wrapper for `python_scripts/finnish_custom_churro_infer.py` with optional local vLLM startup and repeat runs.
-
-How to run (example):
-```bash
-bash shell_scripts/run_finnish_custom_churro_infer_existing_vllm.sh \
-  --backend vllm \
-  --dataset-id stanford-oval/churro-dataset \
-  --dataset-split test \
-  --max-samples-per-split 0 \
-  --model-id stanford-oval/churro-3B \
-  --system-message "Transcribe the entiretly of this historical documents to XML format." \
-  --max-new-tokens 22000 \
-  --temperature 0.6 \
-  --device auto \
-  --max-concurrency 32 \
-  --vllm-base-url http://localhost:8000/v1 \
-  --vllm-model churro \
-  --vllm-api-key "${OPENAI_API_KEY:-EMPTY}" \
-  --vllm-timeout-seconds 3600 \
-  --output-dir /scratch/project_2017385/dorian/HTR-context-OCR/responses/finnish_custom_infer_run1 \
-  --metrics-output-root /scratch/project_2017385/dorian/HTR-context-OCR/results/finnish_custom_infer_run1 \
-  --skip-existing \
-  --repeat-count 1 \
-  --start-local-vllm 1 \
-  --local-vllm-port 8000 \
-  --local-vllm-model-name churro \
-  --model-repo stanford-oval/churro-3B \
-  --max-model-len 125000 \
-  --gpu-memory-utilization 0.3 \
-  --wait-seconds 1200 \
-  --sleep-seconds 2
-```
-
-Flags:
-- Pass-through to python:
-  - `--backend`, `--dataset-id`, `--dataset-split`, `--max-samples-per-split`
-  - `--model-id`, `--system-message`, `--max-new-tokens`, `--temperature`, `--device`
-  - `--max-concurrency`, `--vllm-base-url`, `--vllm-model`, `--vllm-api-key`, `--vllm-timeout-seconds`
-  - `--output-dir`, `--metrics-output-root`, `--skip-existing`
-- Wrapper/runtime:
-  - `--repeat-count`
-  - `--start-local-vllm`, `--local-vllm-port`, `--local-vllm-model-name`
-  - `--model-repo`, `--max-model-len`, `--gpu-memory-utilization`
-  - `--wait-seconds`, `--sleep-seconds`
-  - `-h`, `--help`
-
----
-
-## `shell_scripts/run_hugh_line_transform.sh`
-
-Purpose:
-- Submit/run a Hough-line transform job by calling:
-  - `python3 /scratch/project_2017385/dorian/Churro_copy/hugh_line_transform_dev_schuro.py`
-
-How to run:
-```bash
-bash shell_scripts/run_hugh_line_transform.sh
-```
-
-Optional:
-- You can pass a results directory as the first argument; it exports it as `RESULTS_DIR` for the Python script:
-```bash
-bash shell_scripts/run_hugh_line_transform.sh /path/to/results_dir
-```
-
-Notes:
-- This script is tightly coupled to `/scratch/project_2017385/dorian/Churro_copy`.
-- It uses HPC modules and Slurm resource directives; best run with `sbatch` on the cluster:
-```bash
-sbatch shell_scripts/run_hugh_line_transform.sh
+python3.12 tests/custom_churro_infer.py --backend vllm --dataset-split all --skip-existing
 ```

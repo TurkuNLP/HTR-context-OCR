@@ -23,12 +23,13 @@ KIND_REF_TO_REF = "ref_to_ref"
 KIND_REF_TO_ADJUSTED_PRED = "ref_to_adjusted_pred"
 
 
-# Keep backend fixed to one exact implementation across all execution modes.
-LEVENSHTEIN_BACKEND_C = "c"
-
-
 def build_worker_args_payload(args: argparse.Namespace) -> dict:
-    """Build a minimal pickle-friendly argument payload for worker tasks."""
+    """Build a minimal pickle-friendly argument payload for worker tasks.
+
+    Only parameters that truly vary per run are carried into the worker process.
+    Levenshtein backend selection is intentionally absent because the pipeline now
+    uses one fixed exact C-backed implementation.
+    """
     return {
         "window_size": int(args.window_size),
         "window_stride": int(args.window_stride),
@@ -39,7 +40,6 @@ def build_worker_args_payload(args: argparse.Namespace) -> dict:
         "hough_start": float(args.hough_start),
         "align_abs_min_len": float(args.align_abs_min_len),
         "align_min_iou_threshold": float(args.align_min_iou_threshold),
-        "levenshtein_backend": LEVENSHTEIN_BACKEND_C,
     }
 
 

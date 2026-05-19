@@ -6,9 +6,9 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --mem=20G
-#SBATCH --chdir=/scratch/project_2017385/dorian/HTR-context-OCR/text_metrics_v2_1_parallel
-#SBATCH -o /scratch/project_2017385/dorian/HTR-context-OCR/logs/text_metrics_report_v2_1_parallel_%j.out
-#SBATCH -e /scratch/project_2017385/dorian/HTR-context-OCR/logs/text_metrics_report_v2_1_parallel_%j.err
+#SBATCH --chdir=/scratch/project_2017385/dorian/Churro_copy/text_metrics_v2_1_parallel
+#SBATCH -o /scratch/project_2017385/dorian/Churro_copy/logs/text_metrics_report_v2_1_parallel_%j.out
+#SBATCH -e /scratch/project_2017385/dorian/Churro_copy/logs/text_metrics_report_v2_1_parallel_%j.err
 
 set -euo pipefail
 
@@ -22,9 +22,7 @@ if command -v module >/dev/null 2>&1; then
   module load pytorch
 fi
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
-LOG_DIR="${PROJECT_DIR}/logs"
+SCRIPT_DIR="/scratch/project_2017385/dorian/Churro_copy/text_metrics_v2_1_parallel"
 cd "${SCRIPT_DIR}"
 
 RUNFILE_JSON="${RUNFILE_JSON:-}"
@@ -33,7 +31,7 @@ SCORES_PKL_ROOT="${SCORES_PKL_ROOT:-}"
 SCORES_PKL_REF_TO_PRED="${SCORES_PKL_REF_TO_PRED:-}"
 SCORES_PKL_REF_TO_REF="${SCORES_PKL_REF_TO_REF:-}"
 SCORES_PKL_REF_TO_ADJUSTED_PRED="${SCORES_PKL_REF_TO_ADJUSTED_PRED:-}"
-PROJECT_ROOT_RESULTS="${PROJECT_ROOT_RESULTS:-${PROJECT_DIR}/results/text_metrics_results_v2_1_parallel}"
+PROJECT_ROOT_RESULTS="${PROJECT_ROOT_RESULTS:-/scratch/project_2017385/dorian/Churro_copy/results/text_metrics_results_v2_1_parallel}"
 OUTPUT_DIR="${OUTPUT_DIR:-}"
 WINDOW_SIZE="${WINDOW_SIZE:-50}"
 WINDOW_STRIDE="${WINDOW_STRIDE:-35}"
@@ -47,7 +45,6 @@ HOUGH_SEED="${HOUGH_SEED:-0}"
 HOUGH_START="${HOUGH_START:-2.2}"
 ALIGN_ABS_MIN_LEN="${ALIGN_ABS_MIN_LEN:-6.0}"
 ALIGN_MIN_IOU_THRESHOLD="${ALIGN_MIN_IOU_THRESHOLD:-}"
-LEVENSHTEIN_BACKEND="${LEVENSHTEIN_BACKEND:-c}"
 WITH_VISUALS="${WITH_VISUALS:-0}"
 REPORT_DEBUG="${REPORT_DEBUG:-0}"
 HOUGH_PARAMS_PER_DOCUMENT_JSON="${HOUGH_PARAMS_PER_DOCUMENT_JSON:-}"
@@ -101,9 +98,6 @@ Per-document Hough overrides:
   --hough-params-per-document-json <path>      Optional best_params_per_document.json (tuner output).
   --hough-params-selection-mode <mode>         only_json_docs | all_selected_docs. Default: only_json_docs
   --hough-params-strict                        Fail on JSON/selection mismatches instead of fallback.
-Levenshtein backend:
-  --levenshtein-backend <c>            Backend for Levenshtein calculations. Default: c
-
 Debug:
   --debug                                     Write run-level timing telemetry JSON file (report_timings.json).
 
@@ -238,11 +232,6 @@ while [[ $# -gt 0 ]]; do
       HOUGH_PARAMS_STRICT="1"
       shift
       ;;
-    --levenshtein-backend)
-      [[ $# -ge 2 ]] || { echo "[error] --levenshtein-backend requires a value" >&2; exit 1; }
-      LEVENSHTEIN_BACKEND="$2"
-      shift 2
-      ;;
     --with-visuals)
       WITH_VISUALS="1"
       shift
@@ -371,11 +360,6 @@ if [[ "${HOUGH_PARAMS_STRICT}" == "1" && -z "${HOUGH_PARAMS_PER_DOCUMENT_JSON}" 
   echo "[error] --hough-params-strict requires --hough-params-per-document-json" >&2
   exit 1
 fi
-if [[ "${LEVENSHTEIN_BACKEND}" != "c" ]]; then
-  echo "[error] --levenshtein-backend must be: c (got: ${LEVENSHTEIN_BACKEND})" >&2
-  exit 1
-fi
-
 # Keep Slurm allocation aligned with --workers.
 # Slurm directives are static at submit time, so we re-submit if needed.
 ALLOCATED_NTASKS_PER_NODE=""
@@ -418,7 +402,7 @@ else
   REPORT_DIR="${RUN_DIR}/text_metrics_report"
 fi
 
-mkdir -p "${REPORT_DIR}" "${LOG_DIR}"
+mkdir -p "${REPORT_DIR}" "/scratch/project_2017385/dorian/Churro_copy/logs"
 if [[ -n "${RUN_DIR}" ]]; then
   mkdir -p "${RUN_DIR}"
 fi
@@ -437,7 +421,6 @@ PY_ARGS=(
   --hough-seed "${HOUGH_SEED}"
   --hough-start "${HOUGH_START}"
   --align-abs-min-len "${ALIGN_ABS_MIN_LEN}"
-  --levenshtein-backend "${LEVENSHTEIN_BACKEND}"
 )
 if [[ -n "${SCORES_PKL_REF_TO_PRED}" ]]; then
   PY_ARGS+=(--scores-pkl-ref-to-pred "${SCORES_PKL_REF_TO_PRED}")

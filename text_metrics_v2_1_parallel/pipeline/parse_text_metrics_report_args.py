@@ -6,7 +6,6 @@ import argparse
 import os
 from pathlib import Path
 
-from levenshtein_metric import BACKEND_C, SUPPORTED_BACKENDS
 from line_filtering_v2_1_IoU import DEFAULT_MIN_IOU_THRESHOLD
 
 SELECTION_MODE_ALL_SELECTED_DOCS = "all_selected_docs"
@@ -19,41 +18,41 @@ SUPPORTED_HOUGH_PARAMS_SELECTION_MODES = (
 
 def parse_text_metrics_report_args() -> argparse.Namespace:
     """Parse CLI arguments for the main text-metrics report pipeline."""
-    p = argparse.ArgumentParser(
+    parser = argparse.ArgumentParser(
         description=(
             "Align prediction text with fixed-diagonal probabilistic Hough lines "
             "from runfile JSON and/or precomputed scores.pkl matrices."
         ),
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    p.add_argument("--runfile-json", type=Path, default=None, help="Optional path to outputs.json")
+    parser.add_argument("--runfile-json", type=Path, default=None, help="Optional path to outputs.json")
 
-    p.add_argument(
+    parser.add_argument(
         "--scores-pkl",
         type=Path,
         default=None,
         help="Legacy alias for --scores-pkl-ref-to-pred.",
     )
 
-    p.add_argument(
+    parser.add_argument(
         "--scores-pkl-ref-to-pred",
         type=Path,
         default=None,
         help="Optional ref->pred scores.pkl stream.",
     )
-    p.add_argument(
+    parser.add_argument(
         "--scores-pkl-ref-to-ref",
         type=Path,
         default=None,
         help="Optional ref->ref scores.pkl stream.",
     )
-    p.add_argument(
+    parser.add_argument(
         "--scores-pkl-ref-to-adjusted-pred",
         type=Path,
         default=None,
         help="Optional ref->adjusted-pred scores.pkl stream.",
     )
-    p.add_argument(
+    parser.add_argument(
         "--scores-pkl-root",
         type=Path,
         default=None,
@@ -63,12 +62,12 @@ def parse_text_metrics_report_args() -> argparse.Namespace:
         ),
     )
 
-    p.add_argument("--output-dir", type=Path, required=True, help="Output directory")
-    p.add_argument("--window-size", type=int, default=100, help="Sliding window size")
-    p.add_argument("--window-stride", type=int, default=50, help="Sliding window stride")
-    p.add_argument("--target-fname", type=str, default=None, help="Optional exact/basename target file")
-    p.add_argument("--max-items", type=int, default=None, help="Optional maximum processed items")
-    p.add_argument(
+    parser.add_argument("--output-dir", type=Path, required=True, help="Output directory")
+    parser.add_argument("--window-size", type=int, default=100, help="Sliding window size")
+    parser.add_argument("--window-stride", type=int, default=50, help="Sliding window stride")
+    parser.add_argument("--target-fname", type=str, default=None, help="Optional exact/basename target file")
+    parser.add_argument("--max-items", type=int, default=None, help="Optional maximum processed items")
+    parser.add_argument(
         "--workers",
         type=int,
         default=1,
@@ -77,7 +76,7 @@ def parse_text_metrics_report_args() -> argparse.Namespace:
             "Values greater than available CPUs fail fast by design."
         ),
     )
-    p.add_argument(
+    parser.add_argument(
         "--skip-visuals",
         dest="skip_visuals",
         action="store_true",
@@ -87,7 +86,7 @@ def parse_text_metrics_report_args() -> argparse.Namespace:
             "before-Hough, raw-Hough, filtered-lines, optional after-reordering, and count_line_coverage (x/y)."
         ),
     )
-    p.add_argument(
+    parser.add_argument(
         "--with-visuals",
         dest="skip_visuals",
         action="store_false",
@@ -97,25 +96,25 @@ def parse_text_metrics_report_args() -> argparse.Namespace:
         ),
     )
 
-    p.add_argument("--hough-threshold", type=int, default=26, help="Hough vote threshold")
-    p.add_argument("--hough-line-length", type=int, default=10, help="Minimum accepted line length")
-    p.add_argument("--hough-line-gap", type=int, default=15, help="Maximum gap to connect line pixels")
-    p.add_argument("--hough-seed", type=int, default=0, help="Base random seed")
-    p.add_argument("--hough-start", type=float, default=2.6, help="Initial adaptive threshold start before decrement loop")
-    p.add_argument(
+    parser.add_argument("--hough-threshold", type=int, default=26, help="Hough vote threshold")
+    parser.add_argument("--hough-line-length", type=int, default=10, help="Minimum accepted line length")
+    parser.add_argument("--hough-line-gap", type=int, default=15, help="Maximum gap to connect line pixels")
+    parser.add_argument("--hough-seed", type=int, default=0, help="Base random seed")
+    parser.add_argument("--hough-start", type=float, default=2.6, help="Initial adaptive threshold start before decrement loop")
+    parser.add_argument(
         "--align-abs-min-len",
         type=float,
         default=8.0,
         help="Absolute minimum line length kept before ownership resolution.",
     )
-    p.add_argument(
+    parser.add_argument(
         "--align-min-iou-threshold",
         type=float,
         default=DEFAULT_MIN_IOU_THRESHOLD,
         help="Minimum true-IoU threshold used to merge overlapping line coverages in v2.1_true_IoU.",
     )
 
-    p.add_argument(
+    parser.add_argument(
         "--hough-params-per-document-json",
         type=Path,
         default=None,
@@ -124,7 +123,7 @@ def parse_text_metrics_report_args() -> argparse.Namespace:
             "When set, matching documents use per-document Hough threshold/line_length/line_gap/seed overrides."
         ),
     )
-    p.add_argument(
+    parser.add_argument(
         "--hough-params-selection-mode",
         type=str,
         choices=SUPPORTED_HOUGH_PARAMS_SELECTION_MODES,
@@ -135,7 +134,7 @@ def parse_text_metrics_report_args() -> argparse.Namespace:
             "all_selected_docs: keep normal selection and override only docs found in JSON."
         ),
     )
-    p.add_argument(
+    parser.add_argument(
         "--hough-params-strict",
         action="store_true",
         help=(
@@ -144,14 +143,7 @@ def parse_text_metrics_report_args() -> argparse.Namespace:
         ),
     )
 
-    p.add_argument(
-        "--levenshtein-backend",
-        type=str,
-        default=BACKEND_C,
-        choices=tuple(SUPPORTED_BACKENDS),
-        help="Levenshtein backend. Only exact C-backed distance is supported in this pipeline.",
-    )
-    p.add_argument(
+    parser.add_argument(
         "--debug",
         action="store_true",
         help=(
@@ -159,7 +151,7 @@ def parse_text_metrics_report_args() -> argparse.Namespace:
             "When disabled, timing collection is skipped to reduce overhead."
         ),
     )
-    return p.parse_args()
+    return parser.parse_args()
 
 
 def validate_workers_or_raise(workers: int) -> int:

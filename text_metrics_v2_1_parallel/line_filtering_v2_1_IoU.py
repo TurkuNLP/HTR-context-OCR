@@ -1,5 +1,7 @@
 import math
+
 import numpy as np
+
 from alignment_utils.line_geometry_support import line_length, line_y_at_x, mean_line_support
 
 DEFAULT_ABS_MIN_LEN = 6.0
@@ -9,10 +11,8 @@ __all__ = [
     "DEFAULT_ABS_MIN_LEN",
     "DEFAULT_MIN_IOU_THRESHOLD",
     "analyze_line_filtering",
-    "filter_lines_for_alignment",
     "filter_lines_for_alignment_by_ownership",
 ]
-
 
 # Build the empty per-column mapping used when no final guides survive.
 def _empty_assignment(n_pred: int) -> dict[str, np.ndarray]:
@@ -617,28 +617,6 @@ def _finalize_outputs(
         key=lambda ln: (float(ln.get("anchor_y", min(ln["y0"], ln["y1"]))), min(ln["x0"], ln["x1"])),
     )
     return final_lines, assignment
-
-
-# Provide the old simple line-list API by delegating to the shared v2.1 ownership filter.
-def filter_lines_for_alignment(
-    lines: list[dict],
-    matrix: np.ndarray,
-    *,
-    abs_min_len: float = DEFAULT_ABS_MIN_LEN,
-    min_iou_threshold: float = DEFAULT_MIN_IOU_THRESHOLD,
-    **_ignored,
-) -> list[dict]:
-    # The older callers only need the final lines, not the per-column assignment arrays.
-    mask_bool = np.zeros_like(matrix, dtype=bool) if matrix.ndim == 2 else np.zeros((0, 0), dtype=bool)
-    final_lines, _ = filter_lines_for_alignment_by_ownership(
-        lines,
-        matrix,
-        mask_bool,
-        abs_min_len=abs_min_len,
-        min_iou_threshold=min_iou_threshold,
-        **_ignored,
-    )
-    return final_lines
 
 
 # Filter lines using true IoU over prediction/reference coverage rather than the v1 ownership geometry.

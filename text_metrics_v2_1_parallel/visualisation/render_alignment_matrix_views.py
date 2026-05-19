@@ -8,17 +8,20 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 
+
 def line_id_for_plot(line: dict, fallback_lid: int) -> int:
-    """Resolve line id for plotting, falling back to list index."""
+    """Resolve line id for plotting, falling back to the list index."""
     return int(line.get("line_id", fallback_lid))
 
 
+
 def line_label_for_plot(line: dict, fallback_lid: int) -> str:
-    """Resolve line label text for plotting."""
+    """Resolve the text label shown for one plotted line."""
     label = line.get("label")
     if label is not None:
         return str(label)
     return str(line_id_for_plot(line, fallback_lid))
+
 
 
 def create_heatmap_figure(
@@ -29,7 +32,7 @@ def create_heatmap_figure(
     figure_height: float,
     cmap: str = "Greys",
 ):
-    """Create a single heatmap figure for a score matrix."""
+    """Create the base heatmap figure for one alignment matrix."""
     fig, ax = plt.subplots(1, 1, figsize=(float(figure_width), float(figure_height)))
     im = ax.imshow(matrix, aspect="auto", cmap=cmap)
     plt.colorbar(im, ax=ax, label="chrF")
@@ -37,6 +40,7 @@ def create_heatmap_figure(
     ax.set_ylabel("ref segment")
     ax.set_title(title)
     return fig, ax
+
 
 
 def draw_labeled_line(
@@ -51,7 +55,7 @@ def draw_labeled_line(
     show_label: bool,
     label_fontsize: float,
 ) -> None:
-    """Draw one line segment and optional text label on an existing axis."""
+    """Draw one line segment and its optional text label on an axis."""
     x0 = float(line["x0"])
     y0 = float(line["y0"])
     x1 = float(line["x1"])
@@ -82,10 +86,11 @@ def draw_labeled_line(
     )
 
 
+
 def raw_segments_to_labeled_lines(
     raw_segments: list[tuple[tuple[float, float], tuple[float, float]]],
 ) -> list[dict]:
-    """Convert raw Hough segment tuples into labeled line dictionaries."""
+    """Convert raw Hough segment tuples into labeled plotting records."""
     out: list[dict] = []
     for raw_line_id, (p0, p1) in enumerate(raw_segments):
         out.append(
@@ -102,8 +107,9 @@ def raw_segments_to_labeled_lines(
     return out
 
 
+
 def normalize_lines_for_labels(lines: list[dict]) -> list[dict]:
-    """Ensure each line dict has stable ``line_id`` and ``label`` fields."""
+    """Ensure each plotted line has stable ``line_id`` and ``label`` fields."""
     out: list[dict] = []
     for fallback_lid, line in enumerate(lines):
         normalized = dict(line)
@@ -112,16 +118,6 @@ def normalize_lines_for_labels(lines: list[dict]) -> list[dict]:
         out.append(normalized)
     return out
 
-
-def build_line_lookup(lines: list[dict]) -> dict[int, dict]:
-    """Build ``line_id -> line`` lookup and validate uniqueness."""
-    lookup: dict[int, dict] = {}
-    for fallback_lid, line in enumerate(lines):
-        lid = line_id_for_plot(line, fallback_lid)
-        if lid in lookup:
-            raise ValueError(f"Duplicate line id in report lines: {lid}")
-        lookup[lid] = line
-    return lookup
 
 
 def save_matrix_visualisation(
