@@ -269,6 +269,10 @@ def run_hough_parameter_sweeps(
         score_index_cache_dir=resolved_index_cache_dir,
         disable_pkl_matrix_source=bool(disable_pkl_matrix_source),
         prepare_ref_to_pred_artifacts=not bool(ref_to_ref_cache_warm_only),
+        # Dynamic-pool workers may legitimately start after faster workers have
+        # already claimed every document.  In that case the iterator should end
+        # cleanly instead of turning an empty pool into a worker failure.
+        raise_when_no_documents_selected=selected_run_items_override is None,
         timing_out=load_timing,
         log_fn=log,
     )

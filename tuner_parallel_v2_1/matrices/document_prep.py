@@ -16,6 +16,7 @@ documents hold matrices in memory.
 """
 
 from dataclasses import dataclass, field
+from itertools import chain
 import time
 from pathlib import Path
 from typing import Iterable, Iterator
@@ -368,6 +369,7 @@ def iter_prepared_documents_from_items(
     score_index_cache_dir: Path | None = None,
     disable_pkl_matrix_source: bool = False,
     prepare_ref_to_pred_artifacts: bool = True,
+    raise_when_no_documents_selected: bool = True,
     timing_out: dict | None = None,
     log_fn: LogFn | None = None,
 ) -> Iterator[SweepDocument]:
@@ -375,14 +377,21 @@ def iter_prepared_documents_from_items(
     ensure_backend_available(levenshtein_backend)
     log = _no_log if log_fn is None else log_fn
     load_started_at = time.perf_counter()
-    selected_items = [dict(item) for item in selected_run_items]
 
     if int(window_size) <= 0 or int(window_stride) <= 0:
         raise ValueError("window_size and window_stride must be positive")
-    if not selected_items:
-        raise RuntimeError("No documents selected for parameter sweep.")
     if matrix_cache_dir is not None and Path(matrix_cache_dir).exists() and not Path(matrix_cache_dir).is_dir():
         raise NotADirectoryError(f"matrix_cache_dir is not a directory: {matrix_cache_dir}")
+
+    selected_item_iterator = iter(selected_run_items)
+    try:
+        # Pull exactly one item as a lookahead.  This keeps dynamic-pool runs
+        # lazy: one scheduler request claims one document, not the whole pool.
+        first_selected_item = dict(next(selected_item_iterator))
+    except StopIteration:
+        if bool(raise_when_no_documents_selected):
+            raise RuntimeError("No documents selected for parameter sweep.")
+        return
 
     cache_dir = None if matrix_cache_dir is None else Path(matrix_cache_dir)
     ref_to_pred_telemetry = MatrixLoadTelemetry(label="ref_to_pred")
@@ -427,7 +436,14 @@ def iter_prepared_documents_from_items(
     hough_context_ref_to_ref_seconds = 0.0
     prepared_count = 0
 
-    for item in selected_items:
+    selected_items_to_prepare = chain(
+        (first_selected_item,),
+        # Convert each later item only when the scheduler asks for another
+        # prepared document.  Dynamic-pool claims therefore stay slot-by-slot.
+        (dict(item) for item in selected_item_iterator),
+    )
+
+    for item in selected_items_to_prepare:
         fname = str(item["fname"])
         pred = str(item["pred"])
         ref = str(item["ref"])

@@ -327,6 +327,41 @@ Keeps the existing document selection semantics.  Dynamic pooling uses this same
 
 Still prepares score matrices, text blocks, whole-document NLS, and Hough contexts.  Dynamic mode feeds this module a lazy claimed-document iterator instead of a fixed list.
 
+Dynamic-pool safety rule:
+
+```text
+document preparation must never convert selected_run_items into a full list
+when selected_run_items may be the dynamic-pool iterator
+```
+
+Why this matters:
+
+```text
+each dynamic-pool iterator step atomically claims one document from available/
+eager list conversion would consume the whole iterator
+consuming the whole iterator would move every document into claimed/
+later Slurm workers would then see an empty pool and exit without work
+```
+
+The implementation uses one-item lookahead instead:
+
+```text
+the first scheduler request claims exactly one document
+pkl indexes and matrix-source state are prepared only after a document exists
+each later scheduler request claims exactly one additional document
+empty late-starting dynamic workers stop cleanly without raising a failure
+```
+
+Regression coverage lives in:
+
+```text
+tests/test_dynamic_pool_lazy_document_preparation.py
+```
+
+That test creates a tiny file-backed dynamic pool and verifies that the first
+prepared-document request leaves two of three documents in `available/`, rather
+than accidentally moving all three documents into `claimed/`.
+
 ### `tuner/tuner_core.py`
 
 Still orchestrates one tuner run and writes the existing JSON/CSV outputs.  The dynamic implementation added only an optional `selected_run_items_override` so already-claimed documents can reuse the same preparation and sweep code.

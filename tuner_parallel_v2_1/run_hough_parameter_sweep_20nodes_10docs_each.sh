@@ -38,11 +38,13 @@ HOUGH_START="2.6"
 ALIGN_ABS_MIN_LEN="6.0"
 ALIGN_MIN_IOU_THRESHOLD="0.035"
 
-ACCOUNT="project_2000539"
+ACCOUNT="project_2017385"
 PARTITION="medium"
 TIME_LIMIT="36:00:00"
 CPUS_PER_TASK="128"
 MEMORY="64G"
+FINAL_VISUAL_CPUS_PER_TASK="8"
+FINAL_VISUAL_MEMORY="64G"
 COMBINATION_BUNDLE_SCOPE="all"
 INCLUDE_CANDIDATE_LINES="1"
 WITH_VISUALS="0"
@@ -108,11 +110,13 @@ Combination bundles:
   --hide-line-labels                          Hide raw/final line labels in the final stitched panels
 
 Slurm options:
-  --account <name>                            Default: project_2000539
+  --account <name>                            Default: project_2017385
   --partition <name>                          Default: medium
   --time <HH:MM:SS>                           Default: 36:00:00
   --cpus-per-task <n>                         Default: 128
   --mem <amount>                              Default: 64G
+  --final-visual-cpus-per-task <n>            CPUs for the final visualisation job (default: 8)
+  --final-visual-mem <amount>                 Memory for the final visualisation job (default: 64G)
 
 Other:
   -h, --help                                  Show this help text
@@ -252,6 +256,14 @@ while [[ $# -gt 0 ]]; do
       MEMORY="${2:?--mem requires a value}"
       shift 2
       ;;
+    --final-visual-cpus-per-task)
+      FINAL_VISUAL_CPUS_PER_TASK="${2:?--final-visual-cpus-per-task requires a value}"
+      shift 2
+      ;;
+    --final-visual-mem)
+      FINAL_VISUAL_MEMORY="${2:?--final-visual-mem requires a value}"
+      shift 2
+      ;;
     --combination-bundle-scope)
       COMBINATION_BUNDLE_SCOPE="${2:?--combination-bundle-scope requires a value}"
       shift 2
@@ -365,6 +377,7 @@ require_positive_int "--window-stride" "${WINDOW_STRIDE}"
 require_positive_int "--workers" "${WORKERS}"
 require_positive_int "--doc-workers" "${DOC_WORKERS}"
 require_positive_int "--cpus-per-task" "${CPUS_PER_TASK}"
+require_positive_int "--final-visual-cpus-per-task" "${FINAL_VISUAL_CPUS_PER_TASK}"
 validate_range "--hough-threshold-range" "${HOUGH_THRESHOLD_START}" "${HOUGH_THRESHOLD_END}" 1
 validate_range "--line-length-range" "${LINE_LENGTH_START}" "${LINE_LENGTH_END}" 1
 validate_range "--line-gap-range" "${LINE_GAP_START}" "${LINE_GAP_END}" 0
@@ -552,8 +565,9 @@ if [[ "${WITH_VISUALS}" == "1" && "${#submitted_job_ids[@]}" -gt 0 ]]; then
     --time="${TIME_LIMIT}"
     --nodes=1
     --ntasks=1
-    --cpus-per-task="${CPUS_PER_TASK}"
-    --mem="${MEMORY}"
+    --ntasks-per-node=1
+    --cpus-per-task="${FINAL_VISUAL_CPUS_PER_TASK}"
+    --mem="${FINAL_VISUAL_MEMORY}"
     --job-name="churro_tune_visuals"
     --output="${OUTPUT_DIR}/logs/final_visuals_%j.out"
     --error="${OUTPUT_DIR}/logs/final_visuals_%j.err"

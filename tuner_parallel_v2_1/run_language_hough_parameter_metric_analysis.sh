@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
 #SBATCH --job-name=lang_hough_diag
-#SBATCH --account=project_2005072
+#SBATCH --account=project_2017385
 #SBATCH --partition=medium
 #SBATCH --time=24:00:00
 #SBATCH --nodes=1
-#SBATCH --ntasks-per-node=8
-#SBATCH --mem=12G
+#SBATCH --ntasks=1
+#SBATCH --ntasks-per-node=1
+#SBATCH --cpus-per-task=8
+#SBATCH --mem=64G
 #SBATCH --chdir=/scratch/project_2017385/dorian/Churro_copy/tuner_parallel_v2_1
 #SBATCH -o logs/language_hough_parameter_metric_analysis_%j.out
 #SBATCH -e logs/language_hough_parameter_metric_analysis_%j.err
