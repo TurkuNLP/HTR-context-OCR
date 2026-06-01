@@ -12,6 +12,8 @@ from dataclasses import dataclass
 import math
 from typing import Sequence
 
+import numpy as np
+
 try:
     from ..cython_accel.optional_line_grouping import weighted_mean_from_scores_and_lengths
 except ImportError:
@@ -19,8 +21,10 @@ except ImportError:
 
 try:
     from .levenshtein_compat import normalized_levenshtein_similarity
+    from .v2_12_compat.line_metric_bundle import reference_rows_for_levenshtein
 except ImportError:
     from metrics.levenshtein_compat import normalized_levenshtein_similarity  # type: ignore
+    from metrics.v2_12_compat.line_metric_bundle import reference_rows_for_levenshtein  # type: ignore
 
 
 @dataclass(frozen=True)
@@ -31,6 +35,22 @@ class WeightedAlongLinesResult:
     unweighted_along_lines_nls: float | None
     scored_line_count: int
     total_line_length: float
+
+
+@dataclass(frozen=True)
+class LineLevelSimilarityRecord:
+    """Exact text-similarity score for one final line.
+
+    ``line_id`` is the index of the line in the current ``lines_used`` list.
+    The caller may later renumber surviving lines, so this record intentionally
+    keeps the original id that was scored.
+    """
+
+    line_id: int
+    normalized_levenshtein_similarity: float
+    line_length: float
+    owned_prediction_column_count: int
+    mapped_reference_row_count: int
 
 
 def clamp_unit_interval(value) -> float:
@@ -74,6 +94,105 @@ def _join_blocks_by_indices(blocks: Sequence[str], indices: Sequence[int]) -> st
     return "".join(str(blocks[int(index)]) for index in indices if 0 <= int(index) < block_count)
 
 
+def weighted_along_lines_result_from_line_similarity_records(
+    line_similarity_records: Sequence[LineLevelSimilarityRecord],
+) -> WeightedAlongLinesResult:
+    """Return weighted/unweighted along-line NLS from already-scored lines."""
+    line_scores = [
+        clamp_unit_interval(record.normalized_levenshtein_similarity)
+        for record in line_similarity_records
+        if math.isfinite(float(record.normalized_levenshtein_similarity))
+        and float(record.line_length) > 0.0
+    ]
+    line_lengths = [
+        float(record.line_length)
+        for record in line_similarity_records
+        if math.isfinite(float(record.normalized_levenshtein_similarity))
+        and float(record.line_length) > 0.0
+    ]
+
+    if not line_scores:
+        return WeightedAlongLinesResult(
+            weighted_along_lines_nls=None,
+            unweighted_along_lines_nls=None,
+            scored_line_count=0,
+            total_line_length=0.0,
+        )
+
+    weighted_mean = weighted_mean_from_scores_and_lengths(line_scores, line_lengths)
+    unweighted_mean = float(sum(line_scores) / len(line_scores))
+
+    return WeightedAlongLinesResult(
+        weighted_along_lines_nls=None if weighted_mean is None else clamp_unit_interval(weighted_mean),
+        unweighted_along_lines_nls=clamp_unit_interval(unweighted_mean),
+        scored_line_count=int(len(line_scores)),
+        total_line_length=float(sum(line_lengths)),
+    )
+
+
+def compute_line_level_similarity_records_from_assignment(
+    *,
+    ref_blocks: Sequence[str],
+    other_blocks: Sequence[str],
+    lines_used: list[dict],
+    column_assignment: dict,
+    n_ref_windows: int,
+    levenshtein_backend: str,
+) -> list[LineLevelSimilarityRecord]:
+    """Compute exact line-level NLS for final lines and final ownership arrays.
+
+    This helper is used by the optional post-filter text-quality gate.  It uses
+    the same ownership arrays and the same ``reference_rows_for_levenshtein``
+    helper as the compact v2.12 scoring payload, but it avoids building coverage
+    intervals before weak lines have been removed.
+    """
+    mapped_y = np.asarray(column_assignment.get("mapped_y", []), dtype=float)
+    mapped_line_id = np.asarray(column_assignment.get("mapped_line_id", []), dtype=int)
+    scored_records: list[LineLevelSimilarityRecord] = []
+
+    for line_id, line in enumerate(lines_used):
+        owned_prediction_columns = [
+            int(prediction_column)
+            for prediction_column in np.flatnonzero(mapped_line_id == int(line_id))
+        ]
+        reference_rows_for_line, _rows_reordered_for_monotonicity = reference_rows_for_levenshtein(
+            owned_prediction_columns,
+            mapped_y,
+            int(n_ref_windows),
+        )
+
+        # A line without owned prediction text or mapped reference text cannot
+        # satisfy a minimum text-similarity threshold.
+        if not owned_prediction_columns or not reference_rows_for_line:
+            continue
+
+        prediction_line_text = _join_blocks_by_indices(other_blocks, owned_prediction_columns)
+        reference_line_text = _join_blocks_by_indices(ref_blocks, reference_rows_for_line)
+        line_score = float(
+            normalized_levenshtein_similarity(
+                prediction_line_text,
+                reference_line_text,
+                backend=str(levenshtein_backend),
+            )
+        )
+        line_length = euclidean_line_length(line)
+
+        if not math.isfinite(line_score) or line_length <= 0.0:
+            continue
+
+        scored_records.append(
+            LineLevelSimilarityRecord(
+                line_id=int(line_id),
+                normalized_levenshtein_similarity=clamp_unit_interval(line_score),
+                line_length=float(line_length),
+                owned_prediction_column_count=int(len(owned_prediction_columns)),
+                mapped_reference_row_count=int(len(reference_rows_for_line)),
+            )
+        )
+
+    return scored_records
+
+
 def compute_weighted_along_lines_similarity_from_bundle(
     *,
     ref_blocks: Sequence[str],
@@ -88,11 +207,52 @@ def compute_weighted_along_lines_similarity_from_bundle(
     used for line-level Levenshtein.  Reusing it avoids rescanning ownership
     arrays and keeps the text-order semantics aligned with v2.12.
     """
-    lines_by_id = {int(line_index): line for line_index, line in enumerate(lines_used)}
-    line_scores: list[float] = []
-    line_lengths: list[float] = []
+    return _compute_weighted_along_lines_similarity_from_line_entries(
+        ref_blocks=ref_blocks,
+        other_blocks=other_blocks,
+        lines_used=lines_used,
+        line_entries=list(bundle.get("lines", [])),
+        levenshtein_backend=str(levenshtein_backend),
+    )
 
-    for line_entry in bundle.get("lines", []):
+
+def compute_weighted_along_lines_similarity_from_compact_payload(
+    *,
+    ref_blocks: Sequence[str],
+    other_blocks: Sequence[str],
+    lines_used: list[dict],
+    compact_payload: dict,
+    levenshtein_backend: str,
+) -> WeightedAlongLinesResult:
+    """Compute along-lines NLS from the compact hot-loop scoring payload."""
+    return _compute_weighted_along_lines_similarity_from_line_entries(
+        ref_blocks=ref_blocks,
+        other_blocks=other_blocks,
+        lines_used=lines_used,
+        line_entries=list(compact_payload.get("lines", [])),
+        levenshtein_backend=str(levenshtein_backend),
+    )
+
+
+def _compute_weighted_along_lines_similarity_from_line_entries(
+    *,
+    ref_blocks: Sequence[str],
+    other_blocks: Sequence[str],
+    lines_used: list[dict],
+    line_entries: list[dict],
+    levenshtein_backend: str,
+) -> WeightedAlongLinesResult:
+    """Compute line-level text similarity from canonical line-entry records.
+
+    Both the full v2.12 bundle and the compact scorer payload expose the same
+    two fields needed here: owned prediction columns and mapped reference rows
+    for Levenshtein.  Keeping this calculation in one helper prevents the full
+    and compact payload paths from drifting apart.
+    """
+    lines_by_id = {int(line_index): line for line_index, line in enumerate(lines_used)}
+    line_similarity_records: list[LineLevelSimilarityRecord] = []
+
+    for line_entry in line_entries:
         line_id = int(line_entry.get("line_id", -1))
         owned_prediction_columns = [int(value) for value in line_entry.get("x_window_ids_owned", [])]
         mapped_reference_rows = [int(value) for value in line_entry.get("y_window_ids_for_levenshtein", [])]
@@ -117,26 +277,17 @@ def compute_weighted_along_lines_similarity_from_bundle(
         if line_length <= 0.0:
             continue
 
-        line_scores.append(clamp_unit_interval(line_score))
-        line_lengths.append(float(line_length))
-
-    if not line_scores:
-        return WeightedAlongLinesResult(
-            weighted_along_lines_nls=None,
-            unweighted_along_lines_nls=None,
-            scored_line_count=0,
-            total_line_length=0.0,
+        line_similarity_records.append(
+            LineLevelSimilarityRecord(
+                line_id=int(line_id),
+                normalized_levenshtein_similarity=clamp_unit_interval(line_score),
+                line_length=float(line_length),
+                owned_prediction_column_count=int(len(owned_prediction_columns)),
+                mapped_reference_row_count=int(len(mapped_reference_rows)),
+            )
         )
 
-    weighted_mean = weighted_mean_from_scores_and_lengths(line_scores, line_lengths)
-    unweighted_mean = float(sum(line_scores) / len(line_scores))
-
-    return WeightedAlongLinesResult(
-        weighted_along_lines_nls=None if weighted_mean is None else clamp_unit_interval(weighted_mean),
-        unweighted_along_lines_nls=clamp_unit_interval(unweighted_mean),
-        scored_line_count=int(len(line_scores)),
-        total_line_length=float(sum(line_lengths)),
-    )
+    return weighted_along_lines_result_from_line_similarity_records(line_similarity_records)
 
 
 def normalize_v212_coverage_metrics(raw_ratio_metrics: dict) -> dict:
@@ -191,10 +342,14 @@ def compute_harmonic_tuning_score(
 
 
 __all__ = [
+    "LineLevelSimilarityRecord",
     "WeightedAlongLinesResult",
     "clamp_unit_interval",
     "compute_harmonic_tuning_score",
+    "compute_line_level_similarity_records_from_assignment",
     "compute_weighted_along_lines_similarity_from_bundle",
+    "compute_weighted_along_lines_similarity_from_compact_payload",
     "euclidean_line_length",
     "normalize_v212_coverage_metrics",
+    "weighted_along_lines_result_from_line_similarity_records",
 ]

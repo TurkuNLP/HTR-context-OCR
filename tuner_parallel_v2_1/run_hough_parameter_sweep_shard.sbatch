@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #SBATCH --job-name=churro_tuner_dyn
-#SBATCH --account=project_2017385
+#SBATCH --account=project_2005072
 #SBATCH --partition=medium
 #SBATCH --time=36:00:00
 #SBATCH --nodes=1

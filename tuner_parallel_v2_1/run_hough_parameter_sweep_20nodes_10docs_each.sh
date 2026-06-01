@@ -23,7 +23,7 @@ SCORE_INDEX_CACHE_DIR="${PROJECT_DIR}/text_metrics_v2_1_parallel/.score_index_ca
 DISABLE_PKL_MATRIX_SOURCE="0"
 TEXT_METRICS_V212_DIR="${PROJECT_DIR}/text_metrics_v2_12_parallel"
 REF_TO_REF_CACHE_MODE="auto"
-REF_TO_REF_CACHE_DIR="${PROJECT_DIR}/results/tuner_parallel_v2_1_cache/ref_to_ref_combo_cache_v1"
+REF_TO_REF_CACHE_DIR="${PROJECT_DIR}/results/tuner_parallel_v2_1_cache/ref_to_ref_threshold_pack_cache_v2"
 
 LEVENSHTEIN_BACKEND="c"
 WORKERS="25"
@@ -34,18 +34,23 @@ LINE_LENGTH_START="5"
 LINE_LENGTH_END="35"
 LINE_GAP_START="0"
 LINE_GAP_END="15"
-HOUGH_START="2.6"
+HOUGH_START="8.0"
 ALIGN_ABS_MIN_LEN="6.0"
 ALIGN_MIN_IOU_THRESHOLD="0.035"
+MIN_RAW_REF_TO_PRED_MATRIX_MAX=""
+MIN_RAW_REF_TO_PRED_MATRIX_MAX_WAS_SET="0"
+MIN_SURVIVING_LINE_NLS=""
+MIN_SURVIVING_LINE_NLS_WAS_SET="0"
 
-ACCOUNT="project_2017385"
+ACCOUNT="project_2005072"
 PARTITION="medium"
 TIME_LIMIT="36:00:00"
 CPUS_PER_TASK="128"
 MEMORY="64G"
 FINAL_VISUAL_CPUS_PER_TASK="8"
 FINAL_VISUAL_MEMORY="64G"
-COMBINATION_BUNDLE_SCOPE="all"
+COMBINATION_BUNDLE_SCOPE="none"
+COMBINATION_BUNDLE_SCOPE_WAS_SET="0"
 INCLUDE_CANDIDATE_LINES="1"
 WITH_VISUALS="0"
 HIDE_LINE_LABELS="0"
@@ -89,6 +94,13 @@ Common options:
   --hough-threshold-range <start> <end>       Inclusive threshold range
   --line-length-range <start> <end>           Inclusive line_length range
   --line-gap-range <start> <end>              Inclusive line_gap range
+  --min-raw-ref-to-pred-matrix-max <float>    Optional prefilter. Skip a document when its raw
+                                               ref_to_pred score-matrix maximum is below this value.
+                                               Example: 50.0
+  --min-surviving-line-nls <float>            Optional final-line text-quality filter in [0, 1].
+                                               Final ref_to_pred lines below this line-level
+                                               normalized Levenshtein value are removed after
+                                               geometry filtering. Example: 0.50
 
 Matrix/cache options:
   --scores-pkl-ref-to-pred <path>             Ref-to-pred score stream
@@ -99,18 +111,20 @@ Matrix/cache options:
   --matrix-cache-dir <dir>                    Matrix npz cache directory
   --use-matrix-cache                          Enable matrix npz cache writes/reads
   --disable-pkl-matrix-source                 Disable read-only pkl matrix source
-  --text-metrics-v212-dir <dir>               v2.12 metric source directory
+  --text-metrics-v212-dir <dir>               Optional external v2.12 metric tree for audits/equivalence checks
   --ref-to-ref-cache-mode <off|auto|read-only>
   --ref-to-ref-cache-dir <dir>
 
 Combination bundles:
-  --combination-bundle-scope <scope>          none|all|valid-only|invalid-only (default: all)
-  --no-candidate-lines                        Do not include pre-filter candidate lines in JSONL bundles
+  --combination-bundle-scope <scope>          none|winner-only|all|valid-only|invalid-only
+                                                Default without --with-visuals: none
+                                                Default with --with-visuals: winner-only
+  --no-candidate-lines                        Compatibility flag; lean pklstream bundles do not store candidate geometry
   --with-visuals                              Submit one final visualization job after all workers finish
   --hide-line-labels                          Hide raw/final line labels in the final stitched panels
 
 Slurm options:
-  --account <name>                            Default: project_2017385
+  --account <name>                            Default: project_2005072
   --partition <name>                          Default: medium
   --time <HH:MM:SS>                           Default: 36:00:00
   --cpus-per-task <n>                         Default: 128
@@ -236,6 +250,26 @@ while [[ $# -gt 0 ]]; do
       ALIGN_MIN_IOU_THRESHOLD="${2:?--align-min-iou-threshold requires a value}"
       shift 2
       ;;
+    --min-raw-ref-to-pred-matrix-max)
+      MIN_RAW_REF_TO_PRED_MATRIX_MAX_WAS_SET="1"
+      if [[ $# -lt 2 || "${2:-}" == --* ]]; then
+        MIN_RAW_REF_TO_PRED_MATRIX_MAX=""
+        shift
+      else
+        MIN_RAW_REF_TO_PRED_MATRIX_MAX="${2}"
+        shift 2
+      fi
+      ;;
+    --min-surviving-line-nls)
+      MIN_SURVIVING_LINE_NLS_WAS_SET="1"
+      if [[ $# -lt 2 || "${2:-}" == --* ]]; then
+        MIN_SURVIVING_LINE_NLS=""
+        shift
+      else
+        MIN_SURVIVING_LINE_NLS="${2}"
+        shift 2
+      fi
+      ;;
     --account)
       ACCOUNT="${2:?--account requires a value}"
       shift 2
@@ -266,6 +300,7 @@ while [[ $# -gt 0 ]]; do
       ;;
     --combination-bundle-scope)
       COMBINATION_BUNDLE_SCOPE="${2:?--combination-bundle-scope requires a value}"
+      COMBINATION_BUNDLE_SCOPE_WAS_SET="1"
       shift 2
       ;;
     --no-candidate-lines)
@@ -336,6 +371,34 @@ json_bool() {
   fi
 }
 
+json_optional_number() {
+  local value="$1"
+  if [[ -z "${value}" ]]; then
+    printf 'null'
+  else
+    printf '%s' "${value}"
+  fi
+}
+
+require_nonnegative_float() {
+  local name="$1"
+  local value="$2"
+  if ! [[ "${value}" =~ ^([0-9]+([.][0-9]*)?|[.][0-9]+)$ ]]; then
+    echo "[error] ${name} must be a non-negative number in decimal format, for example 50.0 (got: ${value})" >&2
+    exit 1
+  fi
+}
+
+require_unit_float() {
+  local name="$1"
+  local value="$2"
+  require_nonnegative_float "${name}" "${value}"
+  "${PYTHON_BIN}" -c 'import sys; value=float(sys.argv[1]); sys.exit(0 if 0.0 <= value <= 1.0 else 1)' "${value}" || {
+    echo "[error] ${name} must be between 0.0 and 1.0 inclusive (got: ${value})" >&2
+    exit 1
+  }
+}
+
 if [[ -z "${RUNFILE_JSON}" || -z "${OUTPUT_DIR}" ]]; then
   echo "[error] --runfile-json and --output-dir are required" >&2
   usage >&2
@@ -353,8 +416,8 @@ if [[ "${REF_TO_REF_CACHE_MODE}" != "off" && "${REF_TO_REF_CACHE_MODE}" != "auto
   echo "[error] --ref-to-ref-cache-mode must be one of: off, auto, read-only" >&2
   exit 1
 fi
-if [[ "${COMBINATION_BUNDLE_SCOPE}" != "none" && "${COMBINATION_BUNDLE_SCOPE}" != "all" && "${COMBINATION_BUNDLE_SCOPE}" != "valid-only" && "${COMBINATION_BUNDLE_SCOPE}" != "invalid-only" ]]; then
-  echo "[error] --combination-bundle-scope must be one of: none, all, valid-only, invalid-only" >&2
+if [[ "${COMBINATION_BUNDLE_SCOPE}" != "none" && "${COMBINATION_BUNDLE_SCOPE}" != "winner-only" && "${COMBINATION_BUNDLE_SCOPE}" != "all" && "${COMBINATION_BUNDLE_SCOPE}" != "valid-only" && "${COMBINATION_BUNDLE_SCOPE}" != "invalid-only" ]]; then
+  echo "[error] --combination-bundle-scope must be one of: none, winner-only, all, valid-only, invalid-only" >&2
   exit 1
 fi
 if [[ "${WITH_VISUALS}" != "0" && "${WITH_VISUALS}" != "1" ]]; then
@@ -365,8 +428,46 @@ if [[ "${HIDE_LINE_LABELS}" != "0" && "${HIDE_LINE_LABELS}" != "1" ]]; then
   echo "[error] HIDE_LINE_LABELS must be 0 or 1 (got: ${HIDE_LINE_LABELS})" >&2
   exit 1
 fi
-if [[ "${WITH_VISUALS}" == "1" ]]; then
-  COMBINATION_BUNDLE_SCOPE="all"
+if [[ "${WITH_VISUALS}" == "1" && "${COMBINATION_BUNDLE_SCOPE_WAS_SET}" == "0" ]]; then
+  COMBINATION_BUNDLE_SCOPE="winner-only"
+fi
+if [[ "${WITH_VISUALS}" == "1" && "${COMBINATION_BUNDLE_SCOPE}" == "none" ]]; then
+  echo "[error] --with-visuals requires visualization bundles. Omit --combination-bundle-scope for the default winner-only visual bundle, or choose winner-only/all/valid-only explicitly." >&2
+  exit 1
+fi
+if [[ -z "${MIN_RAW_REF_TO_PRED_MATRIX_MAX}" ]]; then
+  if [[ -t 0 ]]; then
+    if [[ "${MIN_RAW_REF_TO_PRED_MATRIX_MAX_WAS_SET}" == "1" ]]; then
+      echo "[prompt] --min-raw-ref-to-pred-matrix-max was provided without a value." >&2
+    else
+      echo "[prompt] Optional raw score-matrix maximum prefilter was not set." >&2
+    fi
+    printf '[prompt] Enter --min-raw-ref-to-pred-matrix-max as a non-negative number, for example 50.0. Press Enter to disable: ' >&2
+    read -r MIN_RAW_REF_TO_PRED_MATRIX_MAX
+  elif [[ "${MIN_RAW_REF_TO_PRED_MATRIX_MAX_WAS_SET}" == "1" ]]; then
+    echo "[error] --min-raw-ref-to-pred-matrix-max was provided without a value and no interactive terminal is available for prompting." >&2
+    echo "[error] Pass a value such as --min-raw-ref-to-pred-matrix-max 50.0, or omit the flag to disable this prefilter." >&2
+    exit 1
+  fi
+fi
+if [[ -n "${MIN_RAW_REF_TO_PRED_MATRIX_MAX}" ]]; then
+  require_nonnegative_float "--min-raw-ref-to-pred-matrix-max" "${MIN_RAW_REF_TO_PRED_MATRIX_MAX}"
+fi
+if [[ -z "${MIN_SURVIVING_LINE_NLS}" ]]; then
+  if [[ -t 0 ]]; then
+    if [[ "${MIN_SURVIVING_LINE_NLS_WAS_SET}" == "1" ]]; then
+      echo "[prompt] --min-surviving-line-nls was provided without a value." >&2
+      printf '[prompt] Enter --min-surviving-line-nls as a number in [0, 1], for example 0.50. Press Enter to disable: ' >&2
+      read -r MIN_SURVIVING_LINE_NLS
+    fi
+  elif [[ "${MIN_SURVIVING_LINE_NLS_WAS_SET}" == "1" ]]; then
+    echo "[error] --min-surviving-line-nls was provided without a value and no interactive terminal is available for prompting." >&2
+    echo "[error] Pass a value such as --min-surviving-line-nls 0.50, or omit the flag to disable this filter." >&2
+    exit 1
+  fi
+fi
+if [[ -n "${MIN_SURVIVING_LINE_NLS}" ]]; then
+  require_unit_float "--min-surviving-line-nls" "${MIN_SURVIVING_LINE_NLS}"
 fi
 
 require_positive_int "--max-items" "${MAX_ITEMS}"
@@ -430,6 +531,10 @@ cat > "${MANIFEST_PATH}" <<EOF
   },
   "with_visuals": $(json_bool "${WITH_VISUALS}"),
   "hide_line_labels": $(json_bool "${HIDE_LINE_LABELS}"),
+  "min_raw_ref_to_pred_matrix_max": $(json_optional_number "${MIN_RAW_REF_TO_PRED_MATRIX_MAX}"),
+  "min_surviving_line_nls": $(json_optional_number "${MIN_SURVIVING_LINE_NLS}"),
+  "combination_bundle_scope": "${COMBINATION_BUNDLE_SCOPE}",
+  "combination_bundle_scope_was_set": $(json_bool "${COMBINATION_BUNDLE_SCOPE_WAS_SET}"),
   "workers": [
 EOF
 
@@ -479,6 +584,12 @@ EOF
     --combination-bundle-scope "${COMBINATION_BUNDLE_SCOPE}"
     --shard-index "${worker_index}"
   )
+  if [[ -n "${MIN_RAW_REF_TO_PRED_MATRIX_MAX}" ]]; then
+    worker_args+=(--min-raw-ref-to-pred-matrix-max "${MIN_RAW_REF_TO_PRED_MATRIX_MAX}")
+  fi
+  if [[ -n "${MIN_SURVIVING_LINE_NLS}" ]]; then
+    worker_args+=(--min-surviving-line-nls "${MIN_SURVIVING_LINE_NLS}")
+  fi
 
   if [[ "${NO_MATRIX_CACHE}" == "1" ]]; then
     worker_args+=(--no-matrix-cache)

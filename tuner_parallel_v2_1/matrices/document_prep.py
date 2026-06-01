@@ -19,7 +19,7 @@ from dataclasses import dataclass, field
 from itertools import chain
 import time
 from pathlib import Path
-from typing import Iterable, Iterator
+from typing import Callable, Iterable, Iterator
 
 import numpy as np
 
@@ -173,6 +173,130 @@ def _build_doc_blocks(pred: str, ref: str, matrix: np.ndarray, window_stride: in
     pred_blocks = build_stride_blocks(pred, n_blocks=n_pred, stride=int(window_stride))
     ref_blocks = build_stride_blocks(ref, n_blocks=n_ref, stride=int(window_stride))
     return pred_blocks, ref_blocks
+
+
+def _prediction_text_is_empty(prediction_text: str) -> bool:
+    """Return True when a selected runfile item has no usable prediction text."""
+    return len(str(prediction_text).strip()) == 0
+
+
+def _finite_matrix_maximum(matrix: np.ndarray) -> float:
+    """Return the finite maximum cell value, or NaN when no finite cell exists."""
+    if matrix.size == 0:
+        return float("nan")
+    finite_mask = np.isfinite(matrix)
+    if not bool(finite_mask.any()):
+        return float("nan")
+    return float(np.nanmax(matrix))
+
+
+def _empty_prediction_skip_record(*, item: dict, fname: str, pred: str, ref: str) -> dict:
+    """Build one stable CSV/JSON record for a document skipped before tuning."""
+    return {
+        "index": int(item.get("index", -1)),
+        "fname": Path(fname).name,
+        "skip_reason": "no_prediction_text",
+        "skip_stage": "document_preparation",
+        "prediction_character_count": int(len(pred)),
+        "prediction_non_whitespace_character_count": int(len(pred.strip())),
+        "reference_character_count": int(len(ref)),
+        "reference_non_whitespace_character_count": int(len(ref.strip())),
+        "ref_to_pred_matrix_rows": None,
+        "ref_to_pred_matrix_cols": None,
+        "ref_to_pred_source": None,
+        "ref_to_pred_matrix_max": None,
+        "min_raw_ref_to_pred_matrix_max": None,
+        "message": "Skipped before matrix loading because the selected runfile prediction text is empty.",
+    }
+
+
+def _no_prediction_windows_skip_record(
+    *,
+    item: dict,
+    fname: str,
+    pred: str,
+    ref: str,
+    ref_to_pred_matrix: np.ndarray,
+    ref_to_pred_source: str,
+) -> dict:
+    """Build a skip record for a score matrix with no prediction columns."""
+    return {
+        "index": int(item.get("index", -1)),
+        "fname": Path(fname).name,
+        "skip_reason": "no_ref_to_pred_prediction_windows",
+        "skip_stage": "document_preparation",
+        "prediction_character_count": int(len(pred)),
+        "prediction_non_whitespace_character_count": int(len(pred.strip())),
+        "reference_character_count": int(len(ref)),
+        "reference_non_whitespace_character_count": int(len(ref.strip())),
+        "ref_to_pred_matrix_rows": int(ref_to_pred_matrix.shape[0]) if ref_to_pred_matrix.ndim >= 1 else 0,
+        "ref_to_pred_matrix_cols": int(ref_to_pred_matrix.shape[1]) if ref_to_pred_matrix.ndim >= 2 else 0,
+        "ref_to_pred_source": str(ref_to_pred_source),
+        "ref_to_pred_matrix_max": _finite_matrix_maximum(ref_to_pred_matrix),
+        "min_raw_ref_to_pred_matrix_max": None,
+        "message": (
+            "Skipped after loading the ref_to_pred matrix because it has zero prediction columns, "
+            "so no prediction-side Hough lines can be evaluated."
+        ),
+    }
+
+
+def _raw_matrix_max_below_threshold_skip_record(
+    *,
+    item: dict,
+    fname: str,
+    pred: str,
+    ref: str,
+    ref_to_pred_matrix: np.ndarray,
+    ref_to_pred_source: str,
+    min_raw_ref_to_pred_matrix_max: float,
+) -> dict:
+    """Build a skip record for a matrix whose strongest cell is below threshold."""
+    matrix_maximum = _finite_matrix_maximum(ref_to_pred_matrix)
+    return {
+        "index": int(item.get("index", -1)),
+        "fname": Path(fname).name,
+        "skip_reason": "raw_ref_to_pred_matrix_max_below_threshold",
+        "skip_stage": "document_preparation",
+        "prediction_character_count": int(len(pred)),
+        "prediction_non_whitespace_character_count": int(len(pred.strip())),
+        "reference_character_count": int(len(ref)),
+        "reference_non_whitespace_character_count": int(len(ref.strip())),
+        "ref_to_pred_matrix_rows": int(ref_to_pred_matrix.shape[0]) if ref_to_pred_matrix.ndim >= 1 else 0,
+        "ref_to_pred_matrix_cols": int(ref_to_pred_matrix.shape[1]) if ref_to_pred_matrix.ndim >= 2 else 0,
+        "ref_to_pred_source": str(ref_to_pred_source),
+        "ref_to_pred_matrix_max": matrix_maximum,
+        "min_raw_ref_to_pred_matrix_max": float(min_raw_ref_to_pred_matrix_max),
+        "message": (
+            "Skipped after loading the ref_to_pred matrix because the raw finite matrix maximum "
+            "is below the configured minimum raw ref_to_pred matrix maximum."
+        ),
+    }
+
+
+def _record_skipped_document(
+    *,
+    skip_record: dict,
+    skipped_documents: list[dict],
+    skipped_reason_counts: dict[str, int],
+    log_fn: LogFn,
+    on_document_skipped: Callable[[dict], None] | None,
+) -> None:
+    """Store, log, and optionally report one skipped document."""
+    skipped_documents.append(skip_record)
+    skip_reason = str(skip_record["skip_reason"])
+    skipped_reason_counts[skip_reason] = int(skipped_reason_counts.get(skip_reason, 0)) + 1
+    matrix_cols = skip_record.get("ref_to_pred_matrix_cols")
+    matrix_cols_text = "" if matrix_cols is None else f" ref_to_pred_cols={int(matrix_cols)}"
+    matrix_maximum = skip_record.get("ref_to_pred_matrix_max")
+    matrix_maximum_text = "" if matrix_maximum is None else f" ref_to_pred_max={float(matrix_maximum):.6f}"
+    log_fn(
+        f"[skip-document] fname={skip_record['fname']} index={int(skip_record['index'])} "
+        f"reason={skip_reason} pred_chars={int(skip_record['prediction_character_count'])} "
+        f"ref_chars={int(skip_record['reference_character_count'])}{matrix_cols_text}{matrix_maximum_text}"
+    )
+    if on_document_skipped is not None:
+        on_document_skipped(dict(skip_record))
 
 
 def _prepare_readonly_pkl_source(
@@ -371,6 +495,8 @@ def iter_prepared_documents_from_items(
     prepare_ref_to_pred_artifacts: bool = True,
     raise_when_no_documents_selected: bool = True,
     timing_out: dict | None = None,
+    on_document_skipped: Callable[[dict], None] | None = None,
+    min_raw_ref_to_pred_matrix_max: float | None = None,
     log_fn: LogFn | None = None,
 ) -> Iterator[SweepDocument]:
     """Yield prepared documents using layered matrix sources and timings."""
@@ -382,6 +508,8 @@ def iter_prepared_documents_from_items(
         raise ValueError("window_size and window_stride must be positive")
     if matrix_cache_dir is not None and Path(matrix_cache_dir).exists() and not Path(matrix_cache_dir).is_dir():
         raise NotADirectoryError(f"matrix_cache_dir is not a directory: {matrix_cache_dir}")
+    if min_raw_ref_to_pred_matrix_max is not None and float(min_raw_ref_to_pred_matrix_max) < 0.0:
+        raise ValueError("min_raw_ref_to_pred_matrix_max must be non-negative when provided")
 
     selected_item_iterator = iter(selected_run_items)
     try:
@@ -435,6 +563,9 @@ def iter_prepared_documents_from_items(
     hough_context_ref_to_pred_seconds = 0.0
     hough_context_ref_to_ref_seconds = 0.0
     prepared_count = 0
+    selected_count_seen = 0
+    skipped_documents: list[dict] = []
+    skipped_reason_counts: dict[str, int] = {}
 
     selected_items_to_prepare = chain(
         (first_selected_item,),
@@ -447,6 +578,18 @@ def iter_prepared_documents_from_items(
         fname = str(item["fname"])
         pred = str(item["pred"])
         ref = str(item["ref"])
+        selected_count_seen += 1
+
+        if _prediction_text_is_empty(pred):
+            skip_record = _empty_prediction_skip_record(item=item, fname=fname, pred=pred, ref=ref)
+            _record_skipped_document(
+                skip_record=skip_record,
+                skipped_documents=skipped_documents,
+                skipped_reason_counts=skipped_reason_counts,
+                log_fn=log,
+                on_document_skipped=on_document_skipped,
+            )
+            continue
 
         if bool(prepare_ref_to_pred_artifacts):
             ref_to_pred_matrix, ref_to_pred_source = _load_or_compute_score_matrix(
@@ -461,6 +604,43 @@ def iter_prepared_documents_from_items(
                 telemetry=ref_to_pred_telemetry,
                 log_fn=log,
             )
+            if ref_to_pred_matrix.ndim != 2 or int(ref_to_pred_matrix.shape[1]) <= 0:
+                skip_record = _no_prediction_windows_skip_record(
+                    item=item,
+                    fname=fname,
+                    pred=pred,
+                    ref=ref,
+                    ref_to_pred_matrix=ref_to_pred_matrix,
+                    ref_to_pred_source=ref_to_pred_source,
+                )
+                _record_skipped_document(
+                    skip_record=skip_record,
+                    skipped_documents=skipped_documents,
+                    skipped_reason_counts=skipped_reason_counts,
+                    log_fn=log,
+                    on_document_skipped=on_document_skipped,
+                )
+                continue
+            if min_raw_ref_to_pred_matrix_max is not None:
+                ref_to_pred_matrix_max = _finite_matrix_maximum(ref_to_pred_matrix)
+                if not np.isfinite(ref_to_pred_matrix_max) or ref_to_pred_matrix_max < float(min_raw_ref_to_pred_matrix_max):
+                    skip_record = _raw_matrix_max_below_threshold_skip_record(
+                        item=item,
+                        fname=fname,
+                        pred=pred,
+                        ref=ref,
+                        ref_to_pred_matrix=ref_to_pred_matrix,
+                        ref_to_pred_source=ref_to_pred_source,
+                        min_raw_ref_to_pred_matrix_max=float(min_raw_ref_to_pred_matrix_max),
+                    )
+                    _record_skipped_document(
+                        skip_record=skip_record,
+                        skipped_documents=skipped_documents,
+                        skipped_reason_counts=skipped_reason_counts,
+                        log_fn=log,
+                        on_document_skipped=on_document_skipped,
+                    )
+                    continue
         else:
             # The warm-up path only needs the reference-self matrix/context.
             # A zero-sized placeholder satisfies the shared SweepDocument shape
@@ -558,12 +738,25 @@ def iter_prepared_documents_from_items(
         f"hough_ctx_ref_to_pred_s={hough_context_ref_to_pred_seconds:.3f} "
         f"hough_ctx_ref_to_ref_s={hough_context_ref_to_ref_seconds:.3f}"
     )
+    if skipped_documents:
+        log(
+            f"[skip-summary] skipped_documents={len(skipped_documents)} "
+            f"prepared_documents={prepared_count} reasons={dict(skipped_reason_counts)}"
+        )
 
     if timing_out is not None:
         timing_out.clear()
         timing_out.update(
             {
                 "load_documents_total_seconds": float(load_total_seconds),
+                "selected_document_records_seen": int(selected_count_seen),
+                "prepared_document_count": int(prepared_count),
+                "skipped_document_count": int(len(skipped_documents)),
+                "skipped_document_reason_counts": dict(skipped_reason_counts),
+                "skipped_documents": list(skipped_documents),
+                "min_raw_ref_to_pred_matrix_max": (
+                    None if min_raw_ref_to_pred_matrix_max is None else float(min_raw_ref_to_pred_matrix_max)
+                ),
                 "whole_document_nls_seconds": float(whole_document_nls_seconds),
                 "precompute_blocks_seconds": float(block_build_seconds),
                 "hough_context_ref_to_pred_seconds": float(hough_context_ref_to_pred_seconds),
@@ -615,6 +808,8 @@ def load_documents(
     max_items: int | None = None,
     selection_index_range: tuple[int, int] | None = None,
     timing_out: dict | None = None,
+    on_document_skipped: Callable[[dict], None] | None = None,
+    min_raw_ref_to_pred_matrix_max: float | None = None,
     log_fn: LogFn | None = None,
 ) -> list[SweepDocument]:
     """Compatibility loader returning all prepared documents as a list."""
@@ -640,6 +835,8 @@ def load_documents(
             disable_pkl_matrix_source=bool(disable_pkl_matrix_source),
             prepare_ref_to_pred_artifacts=bool(prepare_ref_to_pred_artifacts),
             timing_out=timing_out,
+            on_document_skipped=on_document_skipped,
+            min_raw_ref_to_pred_matrix_max=min_raw_ref_to_pred_matrix_max,
             log_fn=log_fn,
         )
     )

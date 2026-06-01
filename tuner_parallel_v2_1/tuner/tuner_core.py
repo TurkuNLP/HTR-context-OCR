@@ -31,7 +31,9 @@ try:
     from ..metrics.v2_12_metric_adapter import configure_text_metrics_v212_dir, get_v212_metric_functions
     from ..cache.ref_to_ref_combo_cache import RefToRefCombinationCache
     from ..outputs.tuner_invalid_exports import write_invalid_combinations_csv
-    from ..outputs.tuner_outputs import write_best_configs_csv, write_parameter_curve_csv
+    from ..outputs.tuner_combination_score_exports import CombinationScoreTableWriter
+    from ..outputs.tuner_outputs import write_best_configs_csv, write_parameter_curve_csv, write_skipped_documents_csv
+    from ..outputs.tuner_profile_exports import write_combination_profile_csv
     from ..outputs.tuner_result_exports import (
         build_parameter_influence_rows,
         write_best_params_json,
@@ -52,6 +54,7 @@ try:
         DEFAULT_SCORE_INDEX_CACHE_DIR,
         DEFAULT_REF_TO_REF_COMBO_CACHE_DIR,
         DEFAULT_TEXT_METRICS_V212_DIR,
+        DEFAULT_HOUGH_START,
         HoughBaselineConfig,
         HoughSweepRanges,
         LogFn,
@@ -72,7 +75,9 @@ except ImportError:
     from metrics.v2_12_metric_adapter import configure_text_metrics_v212_dir, get_v212_metric_functions  # type: ignore
     from cache.ref_to_ref_combo_cache import RefToRefCombinationCache  # type: ignore
     from outputs.tuner_invalid_exports import write_invalid_combinations_csv  # type: ignore
-    from outputs.tuner_outputs import write_best_configs_csv, write_parameter_curve_csv  # type: ignore
+    from outputs.tuner_combination_score_exports import CombinationScoreTableWriter  # type: ignore
+    from outputs.tuner_outputs import write_best_configs_csv, write_parameter_curve_csv, write_skipped_documents_csv  # type: ignore
+    from outputs.tuner_profile_exports import write_combination_profile_csv  # type: ignore
     from outputs.tuner_result_exports import (  # type: ignore
         build_parameter_influence_rows,
         write_best_params_json,
@@ -93,6 +98,7 @@ except ImportError:
         DEFAULT_SCORE_INDEX_CACHE_DIR,
         DEFAULT_REF_TO_REF_COMBO_CACHE_DIR,
         DEFAULT_TEXT_METRICS_V212_DIR,
+        DEFAULT_HOUGH_START,
         HoughBaselineConfig,
         HoughSweepRanges,
         LogFn,
@@ -148,8 +154,10 @@ def load_documents(
     max_items: int | None = None,
     selection_index_range: tuple[int, int] | None = None,
     timing_out: dict | None = None,
+    on_document_skipped: Callable[[dict], None] | None = None,
+    min_raw_ref_to_pred_matrix_max: float | None = None,
     log_fn: LogFn | None = None,
-    hough_start: float = 2.6,
+    hough_start: float = DEFAULT_HOUGH_START,
 ):
     """Prepare document payloads once so the sweep can reuse expensive state."""
     return _load_documents(
@@ -169,6 +177,8 @@ def load_documents(
         max_items=max_items,
         selection_index_range=selection_index_range,
         timing_out=timing_out,
+        on_document_skipped=on_document_skipped,
+        min_raw_ref_to_pred_matrix_max=min_raw_ref_to_pred_matrix_max,
         log_fn=log_fn,
     )
 
@@ -205,6 +215,11 @@ def run_hough_parameter_sweeps(
     selected_run_items_override: Iterable[dict] | None = None,
     selected_document_count_override: int | None = None,
     on_document_completed: Callable[[object, dict], None] | None = None,
+    on_document_skipped: Callable[[dict], None] | None = None,
+    min_raw_ref_to_pred_matrix_max: float | None = None,
+    min_surviving_line_nls: float | None = None,
+    profile_combinations: bool = False,
+    write_combination_score_table: bool = True,
     log_fn: LogFn | None = None,
 ) -> dict:
     """Run per-document tuning and build summary/CSV/JSON artifacts."""
@@ -213,6 +228,14 @@ def run_hough_parameter_sweeps(
     baseline = baseline_cfg if baseline_cfg is not None else HoughBaselineConfig()
     active_ranges = default_hough_sweep_ranges() if hough_sweep_ranges is None else hough_sweep_ranges
     load_timing: dict = {}
+    if min_surviving_line_nls is not None and not (0.0 <= float(min_surviving_line_nls) <= 1.0):
+        raise ValueError("min_surviving_line_nls must be between 0.0 and 1.0 inclusive")
+    if min_surviving_line_nls is not None:
+        log(
+            "[line-nls-filter] "
+            f"min_surviving_line_nls={float(min_surviving_line_nls):.6f} "
+            "scope=ref_to_pred_final_lines_after_geometry_filtering"
+        )
 
     resolved_index_cache_dir = (
         DEFAULT_SCORE_INDEX_CACHE_DIR if score_index_cache_dir is None else Path(score_index_cache_dir)
@@ -274,6 +297,8 @@ def run_hough_parameter_sweeps(
         # cleanly instead of turning an empty pool into a worker failure.
         raise_when_no_documents_selected=selected_run_items_override is None,
         timing_out=load_timing,
+        on_document_skipped=on_document_skipped,
+        min_raw_ref_to_pred_matrix_max=min_raw_ref_to_pred_matrix_max,
         log_fn=log,
     )
 
@@ -305,7 +330,13 @@ def run_hough_parameter_sweeps(
     )
 
     combination_bundle_logger = None
+    combination_score_writer = None
     resolved_combination_bundle_dir = None
+    combination_score_table_path = Path(output_dir) / "combination_scores.csv.gz"
+    if bool(write_combination_score_table) and not bool(ref_to_ref_cache_warm_only):
+        combination_score_writer = CombinationScoreTableWriter(output_csv_gz=combination_score_table_path)
+        log(f"[combination-scores] enabled path={combination_score_table_path}")
+
     if str(combination_bundle_scope) != "none":
         try:
             from ..outputs.combination_bundle_logger import CombinationBundleLogger
@@ -346,14 +377,25 @@ def run_hough_parameter_sweeps(
             ref_to_ref_cache=ref_to_ref_cache,
             log_fn=log,
         )
+        if hasattr(ref_to_ref_cache, "close"):
+            # Warm-only runs also queue document-level cache writes; wait here so
+            # the summary reports final cache counters and all files are durable.
+            ref_to_ref_cache.close()
         run_total_seconds = float(time.perf_counter() - run_started_at)
         warm_seconds = float(time.perf_counter() - warm_started_at)
         output_dir = Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
+        skipped_document_records = list(load_timing.get("skipped_documents", []))
+        skipped_documents_csv_path = output_dir / "csv" / "skipped_documents.csv"
+        write_skipped_documents_csv(
+            skipped_records=skipped_document_records,
+            output_csv=skipped_documents_csv_path,
+        )
         summary = {
             "runfile_json": str(Path(runfile_json)),
             "output_dir": str(output_dir),
             "mode": "ref_to_ref_cache_warm_only",
+            "selected_doc_count": int(selected_doc_count),
             "target_fnames": [str(value) for value in (target_fnames or [])],
             "max_items": None if max_items is None else int(max_items),
             "selection_index_range": (
@@ -367,10 +409,25 @@ def run_hough_parameter_sweeps(
             "scores_pkl_ref_to_ref": None if scores_pkl_ref_to_ref is None else str(Path(scores_pkl_ref_to_ref)),
             "score_index_cache_dir": None if resolved_index_cache_dir is None else str(Path(resolved_index_cache_dir)),
             "disable_pkl_matrix_source": bool(disable_pkl_matrix_source),
-            "text_metrics_v212_dir": str(Path(resolved_v212_dir)),
+            "min_raw_ref_to_pred_matrix_max": (
+                None if min_raw_ref_to_pred_matrix_max is None else float(min_raw_ref_to_pred_matrix_max)
+            ),
+            "text_metrics_v212_dir": str(Path(v212_functions.text_metrics_v212_dir)),
+            "requested_text_metrics_v212_dir": str(Path(resolved_v212_dir)),
+            "metric_backend": {
+                "name": "tuner_local_v2_12_compat",
+                "semantics": "v2_12_line_coverage_exact",
+                "external_dependency_required": False,
+                "line_metric_bundle_path": str(Path(v212_functions.line_metric_bundle_path)),
+                "line_coverage_subtract_path": str(Path(v212_functions.line_coverage_subtract_path)),
+            },
             "ref_to_ref_cache": ref_to_ref_cache.stats.as_dict(),
             "baseline": asdict(baseline),
             "doc_count": int(selected_doc_count),
+            "prepared_doc_count": int(load_timing.get("prepared_document_count", warm_summary.document_count)),
+            "skipped_document_count": int(len(skipped_document_records)),
+            "skipped_document_reason_counts": dict(load_timing.get("skipped_document_reason_counts", {})),
+            "skipped_documents_csv_path": str(skipped_documents_csv_path),
             "grid_ranges": active_ranges.as_summary_dict(),
             "active_grid_label": active_ranges.active_grid_label(),
             "combos_per_doc": int(combos_per_doc),
@@ -405,24 +462,59 @@ def run_hough_parameter_sweeps(
             ref_to_ref_cache=ref_to_ref_cache,
             log_fn=log,
             combination_bundle_logger=combination_bundle_logger,
+            combination_score_writer=combination_score_writer,
+            min_surviving_line_nls=min_surviving_line_nls,
+            profile_combinations=bool(profile_combinations),
             on_document_completed=on_document_completed,
         )
     finally:
+        if combination_score_writer is not None:
+            combination_score_writer.close()
         if combination_bundle_logger is not None:
             combination_bundle_logger.close()
+        if hasattr(ref_to_ref_cache, "close"):
+            # Ref-to-ref document cache writes run in the background after each
+            # document finishes.  Close before exporting summaries so cache
+            # stats and files reflect the completed run exactly.
+            ref_to_ref_cache.close()
 
     profile_points = sweep_result["profile_points"]
     doc_best_records = sweep_result["doc_best_records"]
+    skipped_document_records = list(load_timing.get("skipped_documents", []))
     invalid_combination_records = list(sweep_result.get("invalid_combination_records", []))
+    combination_profile_records = list(sweep_result.get("combination_profile_records", []))
     invalid_combination_count = int(sweep_result.get("invalid_combination_count", len(invalid_combination_records)))
     invalid_y_diff_le_minus_one_total = int(sweep_result.get("invalid_y_diff_le_minus_one_total", 0))
     invalid_y_diff_lt_minus_one_total = int(sweep_result.get("invalid_y_diff_lt_minus_one_total", 0))
+    line_nls_filter_all_removed_combination_count = int(
+        sweep_result.get("line_nls_filter_all_removed_combination_count", 0)
+    )
     grid_eval_seconds = float(sweep_result["grid_eval_seconds"])
     doc_grid_seconds_total = float(sweep_result["doc_grid_seconds_total"])
+    evaluated_combination_count_total = int(sweep_result.get("evaluated_combination_count_total", 0))
+    calculation_timing_sums_total = dict(sweep_result.get("calculation_timing_sums_total", {}))
+    calculation_seconds_per_combination = dict(sweep_result.get("calculation_seconds_per_combination", {}))
     scheduler_mode = str(sweep_result.get("scheduler_mode", "serial_documents"))
+    combination_score_table_summary = (
+        {
+            "enabled": False,
+            "csv_gz_path": None,
+            "row_count": 0,
+            "write_seconds": 0.0,
+            "field_count": 0,
+            "format": "csv.gz",
+        }
+        if combination_score_writer is None
+        else combination_score_writer.summary()
+    )
 
     output_dir = Path(output_dir)
     csv_dir = output_dir / "csv"
+    skipped_documents_csv_path = csv_dir / "skipped_documents.csv"
+    write_skipped_documents_csv(
+        skipped_records=skipped_document_records,
+        output_csv=skipped_documents_csv_path,
+    )
 
     profile_started_at = time.perf_counter()
     sweeps: dict[str, dict] = {}
@@ -490,10 +582,23 @@ def run_hough_parameter_sweeps(
 
     invalid_combinations_csv_path = csv_dir / "invalid_combinations.csv"
     write_invalid_combinations_csv(rows=invalid_combination_records, output_csv=invalid_combinations_csv_path)
+    combination_profile_csv_path = None
+    if bool(profile_combinations):
+        combination_profile_csv_path = output_dir / "combination_profile.csv"
+        write_combination_profile_csv(
+            rows=combination_profile_records,
+            output_csv=combination_profile_csv_path,
+        )
     log(
         f"[exports] best_params_json={best_params_json_path} "
         f"influence_csv={all_docs_influence_csv_path} rows={len(influence_rows)} "
-        f"invalid_csv={invalid_combinations_csv_path} invalid_rows={len(invalid_combination_records)}"
+        f"invalid_csv={invalid_combinations_csv_path} invalid_rows={len(invalid_combination_records)} "
+        f"score_table={combination_score_table_summary.get('csv_gz_path')} "
+        f"score_rows={combination_score_table_summary.get('row_count')} "
+        f"profile_csv={combination_profile_csv_path if combination_profile_csv_path is not None else 'disabled'} "
+        f"profile_rows={len(combination_profile_records) if bool(profile_combinations) else 0} "
+        f"skipped_documents_csv={skipped_documents_csv_path} "
+        f"skipped_documents={len(skipped_document_records)}"
     )
 
     run_total_seconds = float(time.perf_counter() - run_started_at)
@@ -512,9 +617,28 @@ def run_hough_parameter_sweeps(
     if best_mean_scores:
         mean_of_parameter_best_scores = float(sum(best_mean_scores) / len(best_mean_scores))
 
+    documents_with_any_line_nls_all_removed = [
+        record
+        for record in doc_best_records
+        if int(record.get("line_nls_filter_all_removed_combination_count", 0) or 0) > 0
+    ]
+    documents_with_best_line_nls_all_removed = [
+        record
+        for record in doc_best_records
+        if bool(record.get("best", {}).get("line_nls_filter_all_lines_removed", False))
+    ]
+    documents_with_all_combinations_line_nls_all_removed = [
+        record
+        for record in doc_best_records
+        if int(record.get("evaluated_combination_count", 0) or 0) > 0
+        and int(record.get("line_nls_filter_all_removed_combination_count", 0) or 0)
+        == int(record.get("evaluated_combination_count", 0) or 0)
+    ]
+
     summary = {
         "runfile_json": str(Path(runfile_json)),
         "output_dir": str(output_dir),
+        "selected_doc_count": int(selected_doc_count),
         "target_fnames": [str(value) for value in (target_fnames or [])],
         "max_items": None if max_items is None else int(max_items),
         "selection_index_range": (
@@ -532,12 +656,42 @@ def run_hough_parameter_sweeps(
         ),
         "score_index_cache_dir": None if resolved_index_cache_dir is None else str(Path(resolved_index_cache_dir)),
         "disable_pkl_matrix_source": bool(disable_pkl_matrix_source),
-        "text_metrics_v212_dir": str(Path(resolved_v212_dir)),
+        "min_raw_ref_to_pred_matrix_max": (
+            None if min_raw_ref_to_pred_matrix_max is None else float(min_raw_ref_to_pred_matrix_max)
+        ),
+        "line_nls_filter": {
+            "enabled": min_surviving_line_nls is not None,
+            "min_surviving_line_nls": None if min_surviving_line_nls is None else float(min_surviving_line_nls),
+            "scope": "ref_to_pred_final_lines_after_geometry_filtering",
+            "all_lines_removed_combination_count": int(line_nls_filter_all_removed_combination_count),
+            "documents_with_any_all_lines_removed_combination_count": int(
+                len(documents_with_any_line_nls_all_removed)
+            ),
+            "documents_where_best_combination_removed_all_lines_count": int(
+                len(documents_with_best_line_nls_all_removed)
+            ),
+            "documents_where_all_combinations_removed_all_lines_count": int(
+                len(documents_with_all_combinations_line_nls_all_removed)
+            ),
+        },
+        "text_metrics_v212_dir": str(Path(v212_functions.text_metrics_v212_dir)),
+        "requested_text_metrics_v212_dir": str(Path(resolved_v212_dir)),
+        "metric_backend": {
+            "name": "tuner_local_v2_12_compat",
+            "semantics": "v2_12_line_coverage_exact",
+            "external_dependency_required": False,
+            "line_metric_bundle_path": str(Path(v212_functions.line_metric_bundle_path)),
+            "line_coverage_subtract_path": str(Path(v212_functions.line_coverage_subtract_path)),
+        },
         "ref_to_ref_cache_warm_only": bool(ref_to_ref_cache_warm_only),
         "ref_to_ref_cache": ref_to_ref_cache.stats.as_dict(),
         "metric_objective": "harmonic_mean_weighted_nls_correct_ref_coverage_non_hallucination_v1",
         "baseline": asdict(baseline),
         "doc_count": int(len(doc_best_records)),
+        "prepared_doc_count": int(load_timing.get("prepared_document_count", len(doc_best_records))),
+        "skipped_document_count": int(len(skipped_document_records)),
+        "skipped_document_reason_counts": dict(load_timing.get("skipped_document_reason_counts", {})),
+        "skipped_documents_csv_path": str(skipped_documents_csv_path),
         "doc_names": [str(record["fname"]) for record in doc_best_records],
         "grid_ranges": active_ranges.as_summary_dict(),
         "active_grid_label": active_ranges.active_grid_label(),
@@ -546,6 +700,7 @@ def run_hough_parameter_sweeps(
             "root_dir": None if resolved_combination_bundle_dir is None else str(Path(resolved_combination_bundle_dir)),
             "scope": str(combination_bundle_scope),
             "include_candidate_lines": bool(combination_bundle_include_candidate_lines),
+            "record_format": "pickle_stream",
             "shard_index": None if shard_index is None else int(shard_index),
         },
         "combos_per_doc": int(combos_per_doc),
@@ -561,6 +716,12 @@ def run_hough_parameter_sweeps(
         "all_documents_parameter_influence_csv_path": str(all_docs_influence_csv_path),
         "all_documents_parameter_influence_row_count": int(len(influence_rows)),
         "invalid_combinations_csv_path": str(invalid_combinations_csv_path),
+        "combination_score_table": combination_score_table_summary,
+        "combination_profiling": {
+            "enabled": bool(profile_combinations),
+            "csv_path": None if combination_profile_csv_path is None else str(combination_profile_csv_path),
+            "row_count": int(len(combination_profile_records)) if bool(profile_combinations) else 0,
+        },
         "invalid_combination_count": int(invalid_combination_count),
         "invalid_y_diff_le_minus_one_total": int(invalid_y_diff_le_minus_one_total),
         "invalid_y_diff_lt_minus_one_total": int(invalid_y_diff_lt_minus_one_total),
@@ -571,6 +732,15 @@ def run_hough_parameter_sweeps(
             "load_documents": load_timing,
             "grid_evaluation_seconds": grid_eval_seconds,
             "doc_grid_seconds_total": doc_grid_seconds_total,
+            "calculation_only": {
+                "description": (
+                    "Sum of evaluator timing fields from completed combinations. "
+                    "This excludes document bundle writing, cache writing, final CSV/JSON exports, and final visuals."
+                ),
+                "evaluated_combination_count": int(evaluated_combination_count_total),
+                "timing_sums_seconds": calculation_timing_sums_total,
+                "seconds_per_combination": calculation_seconds_per_combination,
+            },
             "profile_aggregation_seconds": profile_aggregation_seconds,
             "sweep_total_seconds": float(sweep_total_seconds),
             "sweep_per_parameter_seconds": per_parameter_seconds,
@@ -584,6 +754,9 @@ def run_hough_parameter_sweeps(
             "invalid_combination_count": int(invalid_combination_count),
             "invalid_y_diff_le_minus_one_total": int(invalid_y_diff_le_minus_one_total),
             "invalid_y_diff_lt_minus_one_total": int(invalid_y_diff_lt_minus_one_total),
+            "line_nls_filter_all_removed_combination_count": int(
+                line_nls_filter_all_removed_combination_count
+            ),
         },
     }
 

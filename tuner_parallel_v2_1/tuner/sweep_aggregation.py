@@ -46,6 +46,7 @@ SUMMED_TIMING_FIELDS: tuple[str, ...] = (
     "timing_filter_seconds",
     "timing_detect_filter_seconds",
     "timing_build_bundle_seconds",
+    "timing_line_nls_filter_seconds",
     "timing_coverage_seconds",
     "timing_levenshtein_seconds",
     "timing_total_seconds",
@@ -183,6 +184,7 @@ def _copy_metric_fields(best_eval: dict) -> dict:
         "repetition_on_ref",
         "hallucination",
         "total_line_length",
+        "min_surviving_line_nls",
     ]
     return {field: best_eval.get(field) for field in fields}
 
@@ -212,6 +214,15 @@ def point_from_best(*, doc: SweepDocument, best_eval: dict | None, baseline_cfg:
         "raw_line_count_ref_to_ref": int(best_eval.get("raw_line_count_ref_to_ref", 0)),
         "candidate_line_count": int(best_eval.get("candidate_line_count", 0)),
         "candidate_line_count_ref_to_ref": int(best_eval.get("candidate_line_count_ref_to_ref", 0)),
+        "metric_outcome_reason": best_eval.get("metric_outcome_reason"),
+        "line_nls_filter_enabled": bool(best_eval.get("line_nls_filter_enabled", False)),
+        "line_nls_filter_input_line_count": int(best_eval.get("line_nls_filter_input_line_count", 0) or 0),
+        "line_nls_filter_scored_line_count": int(best_eval.get("line_nls_filter_scored_line_count", 0) or 0),
+        "line_nls_filter_removed_line_count": int(best_eval.get("line_nls_filter_removed_line_count", 0) or 0),
+        "line_nls_filter_surviving_line_count": int(best_eval.get("line_nls_filter_surviving_line_count", 0) or 0),
+        "line_nls_filter_removed_column_count": int(best_eval.get("line_nls_filter_removed_column_count", 0) or 0),
+        "line_nls_filter_surviving_column_count": int(best_eval.get("line_nls_filter_surviving_column_count", 0) or 0),
+        "line_nls_filter_all_lines_removed": bool(best_eval.get("line_nls_filter_all_lines_removed", False)),
         "best_config": {
             PARAM_HOUGH_THRESHOLD: int(best_eval.get(PARAM_HOUGH_THRESHOLD, baseline_cfg.hough_threshold)),
             PARAM_HOUGH_LINE_LENGTH: int(best_eval.get(PARAM_HOUGH_LINE_LENGTH, baseline_cfg.hough_line_length)),

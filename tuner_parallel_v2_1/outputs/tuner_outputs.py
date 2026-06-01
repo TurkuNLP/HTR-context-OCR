@@ -25,6 +25,7 @@ PARAMETER_CURVE_FIELDNAMES = [
     "timing_hough_detect_ref_to_ref_seconds",
     "timing_filter_ref_to_ref_seconds",
     "timing_build_bundle_seconds",
+    "timing_line_nls_filter_seconds",
     "timing_coverage_seconds",
     "timing_levenshtein_seconds",
     "timing_total_seconds",
@@ -34,6 +35,7 @@ BEST_CONFIG_FIELDNAMES = [
     "index",
     "fname",
     "normalised_levenshtein_similarity",
+    "metric_outcome_reason",
     "best_tuning_score",
     "average_weighted_normalised_levenshtein_similarity",
     "correct_ref_coverage",
@@ -57,7 +59,34 @@ BEST_CONFIG_FIELDNAMES = [
     "invalid_combination_count",
     "invalid_y_diff_le_minus_one_total",
     "invalid_y_diff_lt_minus_one_total",
+    "line_nls_filter_enabled",
+    "min_surviving_line_nls",
+    "line_nls_filter_input_line_count",
+    "line_nls_filter_scored_line_count",
+    "line_nls_filter_removed_line_count",
+    "line_nls_filter_surviving_line_count",
+    "line_nls_filter_removed_column_count",
+    "line_nls_filter_surviving_column_count",
+    "line_nls_filter_all_lines_removed",
+    "line_nls_filter_all_removed_combination_count",
     "doc_grid_seconds",
+]
+
+SKIPPED_DOCUMENT_FIELDNAMES = [
+    "index",
+    "fname",
+    "skip_reason",
+    "skip_stage",
+    "prediction_character_count",
+    "prediction_non_whitespace_character_count",
+    "reference_character_count",
+    "reference_non_whitespace_character_count",
+    "ref_to_pred_matrix_rows",
+    "ref_to_pred_matrix_cols",
+    "ref_to_pred_source",
+    "ref_to_pred_matrix_max",
+    "min_raw_ref_to_pred_matrix_max",
+    "message",
 ]
 
 
@@ -100,6 +129,7 @@ def write_best_configs_csv(*, best_records: list[dict], output_csv: Path) -> Non
                 "index": int(rec.get("index", 0)),
                 "fname": str(rec.get("fname", "")),
                 "normalised_levenshtein_similarity": rec.get("whole_document_nls"),
+                "metric_outcome_reason": best.get("metric_outcome_reason"),
                 "best_tuning_score": best.get("tuning_score"),
                 "average_weighted_normalised_levenshtein_similarity": best.get("weighted_along_lines_nls"),
                 "correct_ref_coverage": best.get("correct_ref_coverage"),
@@ -123,14 +153,39 @@ def write_best_configs_csv(*, best_records: list[dict], output_csv: Path) -> Non
                 "invalid_combination_count": int(rec.get("invalid_combination_count", 0)),
                 "invalid_y_diff_le_minus_one_total": int(rec.get("invalid_y_diff_le_minus_one_total", 0)),
                 "invalid_y_diff_lt_minus_one_total": int(rec.get("invalid_y_diff_lt_minus_one_total", 0)),
+                "line_nls_filter_enabled": int(bool(best.get("line_nls_filter_enabled", False))),
+                "min_surviving_line_nls": best.get("min_surviving_line_nls"),
+                "line_nls_filter_input_line_count": int(best.get("line_nls_filter_input_line_count", 0) or 0),
+                "line_nls_filter_scored_line_count": int(best.get("line_nls_filter_scored_line_count", 0) or 0),
+                "line_nls_filter_removed_line_count": int(best.get("line_nls_filter_removed_line_count", 0) or 0),
+                "line_nls_filter_surviving_line_count": int(best.get("line_nls_filter_surviving_line_count", 0) or 0),
+                "line_nls_filter_removed_column_count": int(best.get("line_nls_filter_removed_column_count", 0) or 0),
+                "line_nls_filter_surviving_column_count": int(best.get("line_nls_filter_surviving_column_count", 0) or 0),
+                "line_nls_filter_all_lines_removed": int(bool(best.get("line_nls_filter_all_lines_removed", False))),
+                "line_nls_filter_all_removed_combination_count": int(
+                    rec.get("line_nls_filter_all_removed_combination_count", 0) or 0
+                ),
                 "doc_grid_seconds": rec.get("doc_grid_seconds"),
             }
             writer.writerow({field: _csv_value(row.get(field)) for field in BEST_CONFIG_FIELDNAMES})
 
 
+def write_skipped_documents_csv(*, skipped_records: list[dict], output_csv: Path) -> None:
+    """Write documents intentionally skipped before the Hough sweep."""
+    output_csv = Path(output_csv)
+    output_csv.parent.mkdir(parents=True, exist_ok=True)
+    with output_csv.open("w", encoding="utf-8", newline="") as fh:
+        writer = DictWriter(fh, fieldnames=SKIPPED_DOCUMENT_FIELDNAMES)
+        writer.writeheader()
+        for record in skipped_records:
+            writer.writerow({field: _csv_value(record.get(field)) for field in SKIPPED_DOCUMENT_FIELDNAMES})
+
+
 __all__ = [
     "PARAMETER_CURVE_FIELDNAMES",
     "BEST_CONFIG_FIELDNAMES",
+    "SKIPPED_DOCUMENT_FIELDNAMES",
     "write_parameter_curve_csv",
     "write_best_configs_csv",
+    "write_skipped_documents_csv",
 ]

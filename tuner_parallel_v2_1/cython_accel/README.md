@@ -1,8 +1,9 @@
 # Default Cython Acceleration
 
 This directory contains behavior-preserving Cython helpers for
-`tuner_parallel_v2`.  Normal Slurm runs through `run_hough_parameter_sweep.sh`
-build and require these compiled helpers before the sweep starts.
+`tuner_parallel_v2_1`.  Normal Slurm runs through
+`run_hough_parameter_sweep_20nodes_10docs_each.sh` build and require these
+compiled helpers before the sweep starts.
 
 The pure-Python implementation remains the debugging fallback, but production
 runs should keep:
@@ -31,7 +32,15 @@ weighted mean from line scores and Euclidean line lengths
 ```text
 set IoU for filtering conflict checks
 coverage-index construction by prediction column
+mean support sampling for one line segment
+line path sampling into the Python coverage objects used by the filter
+final prediction-column ownership assignment after coverage merging
 ```
+
+The line path sampler still returns ordinary Python dictionaries, sets, and
+lists.  That is intentional: the expensive repeated interpolation and matrix
+lookup loop is compiled, while the rest of the filter keeps the same readable
+data shape that the Python implementation already used.
 
 The extensions must not change:
 
@@ -51,7 +60,7 @@ output JSON/CSV schemas
 From the tuner directory:
 
 ```bash
-cd /scratch/project_2017385/dorian/Churro_copy/tuner_parallel_v2
+cd /scratch/project_2017385/dorian/Churro_copy/tuner_parallel_v2_1
 source /usr/share/lmod/8.6.17/init/bash
 module use /appl/modulefiles
 module load pytorch
@@ -76,6 +85,7 @@ Filtering helpers:
 
 ```text
 filtering/line_filtering_v2_1_IoU_fast.py
+  -> filtering/filter_cython_accelerators.py
   -> cython_accel.optional_filtering
       -> cython_accel.filter_core if compiled
       -> pure Python fallback otherwise

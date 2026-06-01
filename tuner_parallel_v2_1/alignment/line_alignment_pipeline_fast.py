@@ -112,14 +112,14 @@ def normalize_for_dense_style(mat: np.ndarray) -> np.ndarray:
 
     max_val = float(np.max(mat))
     if max_val <= 1.0:
-        norm = mat.copy()
+        normalized_score_matrix = mat.copy()
     elif max_val <= 100.0:
-        norm = mat / 100.0
+        normalized_score_matrix = mat / 100.0
     else:
-        norm = mat / max_val
+        normalized_score_matrix = mat / max_val
 
     # Clip below 1.0 so the reciprocal emphasis step never divides by zero.
-    return np.clip(norm, 0.0, 0.999999)
+    return np.clip(normalized_score_matrix, 0.0, 0.999999)
 
 
 # Build the empty ownership assignment used for degenerate matrices.
@@ -144,48 +144,74 @@ def precompute_hough_context(
     across all parameter combinations for the same document.
     """
     if matrix.size == 0 or matrix.shape[0] == 0 or matrix.shape[1] == 0:
-        empty_hough_image = np.zeros_like(matrix)
+        empty_hough_image = np.zeros_like(matrix, dtype=float)
         empty_context = {
             "hough_image": empty_hough_image,
             "hough_mask_bool": np.zeros_like(matrix, dtype=bool),
             "mask": empty_hough_image,
             "threshold_start": float("nan"),
+            "hough_stop_criteria": float(1.4 * max(matrix.shape)) if matrix.ndim == 2 else 0.0,
+            "hough_image_intensity_sum": 0.0,
         }
         if keep_debug_arrays:
-            empty_context["norm"] = np.zeros_like(matrix)
-            empty_context["test"] = np.zeros_like(matrix)
+            empty_debug_image = np.zeros_like(matrix, dtype=float)
+            empty_context["normalized_score_matrix"] = empty_debug_image
+            empty_context["reciprocal_emphasis_image"] = empty_debug_image
+            # Compatibility aliases for older exploratory scripts/notebooks.
+            empty_context["norm"] = empty_debug_image
+            empty_context["test"] = empty_debug_image
         return empty_context
 
-    # Preserve the same dense-style preprocessing used by the earlier pipeline.
-    norm = normalize_for_dense_style(matrix)
-    test = 1.0 / (1.0 - norm)
+    row_count, column_count = matrix.shape
 
-    # Preserve the adaptive threshold search exactly so the active mask density
-    # remains compatible with the previous tuner behavior.
-    start = float(start_init)
-    enough = False
-    criteria = 1.4 * matrix.shape[0]
+    # Convert the score matrix into the dense-matrix scale used by the notebook:
+    # values near 1.0 are strong matches, while weak background stays near 0.
+    normalized_score_matrix = normalize_for_dense_style(matrix)
 
-    test2 = test.copy()
-    while not enough:
-        if start < 0:
+    # Reciprocal emphasis turns strong normalized scores into large Hough
+    # evidence. A zero score becomes 1.0, so the later threshold must stop
+    # before weak background pixels are admitted everywhere.
+    reciprocal_emphasis_image = 1.0 / (1.0 - normalized_score_matrix)
+
+    # Match the dense_matrices.ipynb rule tested in the plotting script: use the
+    # longer matrix axis as the expected line scale, because ref-to-pred and
+    # ref-to-ref matrices are often rectangular rather than square.
+    hough_stop_criteria = float(1.4 * max(row_count, column_count))
+
+    threshold_start = float(start_init)
+    thresholded_hough_image = reciprocal_emphasis_image.copy()
+    thresholded_hough_image_intensity = float(thresholded_hough_image.sum())
+    while True:
+        if threshold_start < 0:
             break
-        start -= 0.2
-        test2 = test.copy()
-        test2[test2 < start] = 0
-        enough = (test2 > 0).sum() > criteria
+
+        # Lower the cutoff in the same 0.2 steps as the notebook. The stopping
+        # condition uses total remaining intensity, not active-cell count, so a
+        # compact strong diagonal can win before low-score background fills the
+        # whole Hough image.
+        threshold_start -= 0.2
+        thresholded_hough_image = reciprocal_emphasis_image.copy()
+        thresholded_hough_image[thresholded_hough_image < threshold_start] = 0
+        thresholded_hough_image_intensity = float(thresholded_hough_image.sum())
+        if thresholded_hough_image_intensity > hough_stop_criteria:
+            break
 
     # Keep the old "mask" key as a compatibility alias while giving the active
     # sweep path more descriptive names and a precomputed boolean mask.
     context = {
-        "hough_image": test2,
-        "hough_mask_bool": np.asarray(test2) > 0,
-        "mask": test2,
-        "threshold_start": float(start),
+        "hough_image": thresholded_hough_image,
+        "hough_mask_bool": np.asarray(thresholded_hough_image) > 0,
+        "mask": thresholded_hough_image,
+        "threshold_start": float(threshold_start),
+        "hough_stop_criteria": float(hough_stop_criteria),
+        "hough_image_intensity_sum": float(thresholded_hough_image_intensity),
     }
     if keep_debug_arrays:
-        context["norm"] = norm
-        context["test"] = test
+        context["normalized_score_matrix"] = normalized_score_matrix
+        context["reciprocal_emphasis_image"] = reciprocal_emphasis_image
+        # Compatibility aliases for older exploratory scripts/notebooks.
+        context["norm"] = normalized_score_matrix
+        context["test"] = reciprocal_emphasis_image
     return context
 
 
@@ -199,12 +225,12 @@ def detect_lines_only_from_hough_ctx(
     line_gap: int,
 ) -> dict:
     """Run Hough detection only and return raw candidate segments."""
-    test2 = hough_ctx.get("hough_image", hough_ctx["mask"])
+    thresholded_hough_image = hough_ctx.get("hough_image", hough_ctx["mask"])
 
     # Use a deterministic NumPy Generator so results stay reproducible per seed.
     raw_hough_segments_from_skimage = list(
         probabilistic_hough_line(
-            test2,
+            thresholded_hough_image,
             threshold=int(threshold),
             line_length=int(line_length),
             line_gap=int(line_gap),
@@ -213,10 +239,16 @@ def detect_lines_only_from_hough_ctx(
         )
     )
 
+    # Count the skimage output before the endpoint guard so timing/debug logs can
+    # show how many segments were rejected without changing which segments move
+    # forward into true-IoU filtering.
+    skimage_raw_line_count = int(len(raw_hough_segments_from_skimage))
+
     # Apply an explicit endpoint-based direction check as a second guard after
     # Hough theta restriction.  This keeps upward false positives out of
     # true-IoU filtering and makes the visual definition easy to test.
     raw_lines = keep_only_falling_diagonal_hough_segments(raw_hough_segments_from_skimage)
+    direction_rejected_line_count = int(skimage_raw_line_count - len(raw_lines))
 
     # Filtering is now responsible for all merging, so candidate_segments is
     # simply the raw Hough output in stable list form.
@@ -224,10 +256,12 @@ def detect_lines_only_from_hough_ctx(
 
     return {
         "threshold_start": float(hough_ctx.get("threshold_start", float("nan"))),
-        "mask": test2,
+        "mask": thresholded_hough_image,
         "mask_bool": hough_ctx.get("hough_mask_bool"),
         "raw_lines": raw_lines,
         "candidate_segments": candidate_segments,
+        "skimage_raw_line_count_before_direction_filter": skimage_raw_line_count,
+        "direction_rejected_line_count": direction_rejected_line_count,
     }
 
 
@@ -239,6 +273,7 @@ def filter_lines_after_hough(
     align_abs_min_len: float,
     align_min_iou_threshold: float,
     matrix_is_prepared: bool = False,
+    profile: dict | None = None,
 ) -> dict:
     """Convert raw segments into line records, then run the ownership filter."""
     # Public compatibility callers still get defensive matrix coercion.  The
@@ -249,9 +284,10 @@ def filter_lines_after_hough(
     else:
         mat = coerce_score_matrix(matrix, source_desc="post_hough_filter")
 
-    # Convert raw Hough segments into the line-record dictionaries consumed by
-    # true-IoU filtering.  The helper is tuner-local and mirrors the v2.12
-    # endpoint conversion, avoiding the old v2.1 import-path dependency.
+    # Convert raw Hough endpoint tuples into the line-record dictionaries used
+    # by true-IoU filtering.  Keeping this conversion in ``alignment/`` gives
+    # the filter one simple input shape and avoids hidden dependencies on older
+    # tuner directories.
     candidate_segments = list(det_result.get("candidate_segments", []))
     lines_for_filtering = line_records_from_raw_hough_segments(mat, candidate_segments)
 
@@ -267,6 +303,7 @@ def filter_lines_after_hough(
             mask_bool,
             abs_min_len=float(align_abs_min_len),
             min_iou_threshold=float(align_min_iou_threshold),
+            profile=profile,
         )
     else:
         n_other = mat.shape[1] if mat.ndim == 2 else 0
@@ -290,12 +327,13 @@ def detect_and_filter_lines_from_matrix(
     hough_line_length: int,
     hough_line_gap: int,
     hough_seed: int,
-    hough_start: float = 2.6,
+    hough_start: float = 8.0,
     align_abs_min_len: float,
     align_min_iou_threshold: float = DEFAULT_MIN_IOU_THRESHOLD,
+    profile: dict | None = None,
 ) -> dict:
     """Compatibility helper: detect + filter in one call."""
-    mat = coerce_score_matrix(matrix, source_desc="tuner_parallel_v2:line_alignment_pipeline_fast:matrix")
+    mat = coerce_score_matrix(matrix, source_desc="tuner_parallel_v2_1:line_alignment_pipeline_fast:matrix")
 
     resolved_ctx = hough_ctx
     if resolved_ctx is None:
@@ -314,6 +352,7 @@ def detect_and_filter_lines_from_matrix(
         det_result=det,
         align_abs_min_len=float(align_abs_min_len),
         align_min_iou_threshold=float(align_min_iou_threshold),
+        profile=profile,
     )
 
     return {
@@ -352,7 +391,7 @@ def derive_filtered_line_endpoints(
             window_stride=int(window_stride),
         )
     else:
-        matrix = coerce_score_matrix(precomputed_matrix, source_desc="tuner_parallel_v2:precomputed_matrix")
+        matrix = coerce_score_matrix(precomputed_matrix, source_desc="tuner_parallel_v2_1:precomputed_matrix")
 
     hough_ctx = precompute_hough_context(matrix, start_init=float(hough_start))
     payload = detect_and_filter_lines_from_matrix(

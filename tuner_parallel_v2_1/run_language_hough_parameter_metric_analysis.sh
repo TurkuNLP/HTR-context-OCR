@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #SBATCH --job-name=lang_hough_diag
-#SBATCH --account=project_2017385
+#SBATCH --account=project_2005072
 #SBATCH --partition=medium
 #SBATCH --time=24:00:00
 #SBATCH --nodes=1
@@ -240,6 +240,12 @@ if ! command -v python3 >/dev/null 2>&1; then
 fi
 
 mkdir -p "${SCRIPT_DIR}/logs" "${OUTPUT_DIR}"
+
+# The analysis script imports sibling packages such as outputs/ and matrices/.
+# When Python executes a file by absolute path, it places the file directory
+# (tools/) on sys.path instead of the tuner root.  Exporting SCRIPT_DIR keeps the
+# launcher repeatable from sbatch and terminal without modifying metric logic.
+export PYTHONPATH="${SCRIPT_DIR}:${PYTHONPATH:-}"
 
 PYTHON_ARGS=(
   "${PYTHON_SCRIPT}"

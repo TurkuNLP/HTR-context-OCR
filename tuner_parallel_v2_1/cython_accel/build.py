@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
-"""Build the default Cython extensions for ``tuner_parallel_v2`` in place.
+"""Build the default Cython extensions for ``tuner_parallel_v2_1`` in place.
 
 Run from the tuner directory after loading an environment that provides Cython:
 
 ```bash
-cd /scratch/project_2017385/dorian/Churro_copy/tuner_parallel_v2
+cd /scratch/project_2017385/dorian/Churro_copy/tuner_parallel_v2_1
 module load pytorch
 python cython_accel/build.py build_ext --inplace
 ```
 
-The Slurm wrapper builds these extensions by default after loading the
-``pytorch`` module.  The Python fallbacks still exist for debugging, but normal
-scheduled tuner runs require the compiled helpers before the sweep starts.
+The production Slurm launcher builds these extensions before submitting workers.
+The Python fallbacks still exist for debugging and portability checks, while
+scheduled production runs should keep the compiled helpers available.
 """
 
 from pathlib import Path
@@ -47,7 +47,7 @@ def build_extensions() -> list[Extension]:
 
 
 setup(
-    name="tuner_parallel_v2_cython_accel",
+    name="tuner_parallel_v2_1_cython_accel",
     ext_modules=cythonize(
         build_extensions(),
         compiler_directives={"language_level": "3"},

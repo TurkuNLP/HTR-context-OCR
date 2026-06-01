@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-"""Configuration primitives and shared types for ``tuner_parallel_v2``.
+"""Configuration primitives and shared types for ``tuner_parallel_v2_1``.
 
 This module is the single source of truth for the Hough sweep grid, document
 payload shape, and shared parameter names.  Keeping these definitions here makes
@@ -42,6 +42,7 @@ HOUGH_LINE_LENGTH_MAX = 50
 HOUGH_LINE_GAP_MIN = 1
 HOUGH_LINE_GAP_MAX = 30
 FIXED_HOUGH_SEED = 1
+DEFAULT_HOUGH_START = 8.0
 HOUGH_SEED_MIN = FIXED_HOUGH_SEED
 HOUGH_SEED_MAX = FIXED_HOUGH_SEED
 
@@ -50,7 +51,10 @@ DEFAULT_SCORE_INDEX_CACHE_DIR = (
 )
 DEFAULT_TEXT_METRICS_V212_DIR = Path(__file__).resolve().parents[2] / "text_metrics_v2_12_parallel"
 DEFAULT_REF_TO_REF_COMBO_CACHE_DIR = (
-    Path(__file__).resolve().parents[2] / "results" / "tuner_parallel_v2_cache" / "ref_to_ref_combo_cache_v1"
+    Path(__file__).resolve().parents[2]
+    / "results"
+    / "tuner_parallel_v2_1_cache"
+    / "ref_to_ref_threshold_pack_cache_v2"
 )
 
 
@@ -150,7 +154,13 @@ def build_hough_sweep_ranges(
     line_gap_range: tuple[int, int] | list[int] | None = None,
     seed_range: tuple[int, int] | list[int] | None = None,
 ) -> HoughSweepRanges:
-    """Build active Hough ranges from optional inclusive range overrides."""
+    """Build active Hough ranges from optional inclusive range overrides.
+
+    ``seed_range`` is accepted only because older launch scripts still pass a
+    seed argument.  The current scientific configuration fixes the Hough seed at
+    ``FIXED_HOUGH_SEED`` so the tuner does not multiply the grid by random-seed
+    variants.
+    """
     defaults = default_hough_sweep_ranges()
     fixed_seed_range = InclusiveIntegerRange(FIXED_HOUGH_SEED, FIXED_HOUGH_SEED, allow_zero=False)
     return HoughSweepRanges(
@@ -172,15 +182,8 @@ def build_hough_sweep_ranges(
             allow_zero=True,
             parameter_label=PARAM_HOUGH_LINE_GAP,
         ),
-        # Seed sweep is temporarily disabled so each Hough combination uses the
-        # same deterministic grid seed.  The old range resolver is kept below as
-        # a commented restoration point because the CLI still accepts seed flags.
-        # seed=_range_from_optional_pair(
-        #     pair=seed_range,
-        #     default_range=defaults.seed,
-        #     allow_zero=True,
-        #     parameter_label=PARAM_HOUGH_SEED,
-        # ),
+        # Keep one deterministic seed value.  The caller may pass seed_range for
+        # compatibility, but it does not change the active grid in this tuner.
         seed=fixed_seed_range,
     )
 
@@ -193,7 +196,7 @@ class HoughBaselineConfig:
     hough_line_length: int = 10
     hough_line_gap: int = 15
     hough_seed: int = FIXED_HOUGH_SEED
-    hough_start: float = 2.6
+    hough_start: float = DEFAULT_HOUGH_START
     align_abs_min_len: float = 8.0
     align_min_iou_threshold: float = DEFAULT_MIN_IOU_THRESHOLD
 

@@ -15,10 +15,12 @@ then writes:
   documents, and document-type summaries;
 * one top-level manifest JSON.
 
-The script does not scan every shard.  It uses the known sharding rule
-``document_index // documents_per_shard`` to probe only the expected shard for
-selected documents.  Documents whose ``ref_to_pred`` matrix has zero prediction
-columns are skipped before any threshold JSONL file is loaded.
+For static-shard output, the script uses the known sharding rule
+``document_index // documents_per_shard`` to probe the expected shard directly.
+For dynamic-pool output, it also checks each ``dynamic_*/combination_bundles``
+directory because any worker may have claimed the document.  Documents whose
+``ref_to_pred`` matrix has zero prediction columns are skipped before any
+threshold record stream is loaded.
 """
 
 from __future__ import annotations
@@ -42,6 +44,23 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
+try:
+    from outputs.combination_bundle_records import (
+        GZIP_JSONL_SUFFIX,
+        JSONL_SUFFIX,
+        PICKLE_STREAM_SUFFIX,
+        iter_pickle_stream_records,
+        read_pickle_stream_record_at_position,
+    )
+except ImportError:  # pragma: no cover - supports package-style execution.
+    from ..outputs.combination_bundle_records import (  # type: ignore
+        GZIP_JSONL_SUFFIX,
+        JSONL_SUFFIX,
+        PICKLE_STREAM_SUFFIX,
+        iter_pickle_stream_records,
+        read_pickle_stream_record_at_position,
+    )
+
 
 DEFAULT_RUNFILE_JSON = Path(
     "/scratch/project_2017385/dorian/Churro_copy/results/"
@@ -60,7 +79,7 @@ DEFAULT_REF_TO_REF_SCORES_PKL = Path(
     "ref_to_ref/scores_reference_self_ws50_st35.pkl"
 )
 DEFAULT_OUTPUT_DIR = Path(
-    "/scratch/project_2017385/dorian/Churro_copy/tuner_parallel_v2/"
+    "/scratch/project_2017385/dorian/Churro_copy/tuner_parallel_v2_1/"
     "_language_hough_parameter_metric_visuals_script"
 )
 DEFAULT_DOCUMENTS_PER_SHARD = 50
@@ -174,6 +193,31 @@ COMPACT_METRIC_COLUMNS = [
     "source_jsonl_path",
     "source_line_number",
 ]
+
+COMBINATION_SCORE_TABLE_FILENAME = "combination_scores.csv.gz"
+
+SCORE_TABLE_COLUMNS_REQUIRED_FOR_VISUALS = {
+    "doc_index",
+    "fname",
+    "whole_document_nls",
+    "hough_threshold",
+    "hough_line_length",
+    "hough_line_gap",
+    "hough_seed",
+    "tuning_score",
+    "weighted_along_lines_nls",
+    "correct_ref_coverage",
+    "missing_ref_coverage",
+    "repetition_on_ref",
+    "hallucination",
+    "raw_line_count",
+    "candidate_line_count",
+    "used_line_count",
+    "line_guided_columns",
+    "fallback_columns",
+    "is_valid",
+    "invalid_reason",
+}
 
 DOCUMENT_TABLE_COLUMNS = [
     "document_index",
@@ -437,7 +481,7 @@ def load_document_metadata_json(metadata_json_path: Path) -> dict[str, Any] | No
 
 def bundle_info_from_metadata_path(metadata_json_path: Path, shard_index: int) -> dict[str, Any] | None:
     """Create compact bundle metadata from one document_metadata.json file."""
-    # Load the lightweight bundle metadata before touching any threshold JSONL files.
+    # Load lightweight document metadata before touching threshold record files.
     metadata_payload = load_document_metadata_json(metadata_json_path)
     if metadata_payload is None:
         return None
@@ -590,32 +634,58 @@ def split_documents_by_bundle_availability_and_prediction(
 
 
 # ---------------------------------------------------------------------------
-# Combination JSONL streaming and compact DataFrame creation
+# Combination record streaming and compact DataFrame creation
 # ---------------------------------------------------------------------------
 
 
-def threshold_value_from_jsonl_path(jsonl_path: Path) -> int:
-    """Extract the numeric threshold value from threshold_XXX.jsonl filenames."""
-    # Support both threshold_010.jsonl and threshold_010.jsonl.gz.
-    match = re.search(r"threshold_(\d+)\.jsonl(?:\.gz)?$", Path(jsonl_path).name)
+def threshold_value_from_record_path(record_path: Path) -> int:
+    """Extract the numeric threshold value from threshold bundle filenames."""
+    # Support the new binary stream plus the older JSONL formats.
+    match = re.search(r"threshold_(\d+)(?:\.pklstream|\.jsonl(?:\.gz)?)$", Path(record_path).name)
     if match is None:
         return 10**9
     return int(match.group(1))
 
 
-def iter_threshold_jsonl_paths_for_document_bundle(document_bundle_dir: Path) -> list[Path]:
-    """Return all threshold JSONL files for one document bundle in stable order."""
-    # Read both compressed and uncompressed JSONL variants.
-    jsonl_paths = list(Path(document_bundle_dir).glob("threshold_*.jsonl"))
-    jsonl_paths.extend(Path(document_bundle_dir).glob("threshold_*.jsonl.gz"))
+def iter_threshold_record_paths_for_document_bundle(document_bundle_dir: Path) -> list[Path]:
+    """Return one preferred threshold record file per threshold in stable order."""
+    # Prefer the new binary stream when both new and legacy files exist, because
+    # loading both would duplicate every combination in the metrics DataFrame.
+    preferred_path_by_threshold: dict[int, Path] = {}
+    preferred_rank_by_threshold: dict[int, int] = {}
+    suffix_rank_by_suffix = {
+        PICKLE_STREAM_SUFFIX: 0,
+        JSONL_SUFFIX: 1,
+        GZIP_JSONL_SUFFIX: 2,
+    }
+
+    for record_path in Path(document_bundle_dir).glob("threshold_*.pklstream"):
+        threshold_value = threshold_value_from_record_path(record_path)
+        preferred_path_by_threshold[threshold_value] = record_path
+        preferred_rank_by_threshold[threshold_value] = suffix_rank_by_suffix[PICKLE_STREAM_SUFFIX]
+
+    for record_path in Path(document_bundle_dir).glob("threshold_*.jsonl"):
+        threshold_value = threshold_value_from_record_path(record_path)
+        candidate_rank = suffix_rank_by_suffix[JSONL_SUFFIX]
+        if candidate_rank < preferred_rank_by_threshold.get(threshold_value, 10):
+            preferred_path_by_threshold[threshold_value] = record_path
+            preferred_rank_by_threshold[threshold_value] = candidate_rank
+
+    for record_path in Path(document_bundle_dir).glob("threshold_*.jsonl.gz"):
+        threshold_value = threshold_value_from_record_path(record_path)
+        candidate_rank = suffix_rank_by_suffix[GZIP_JSONL_SUFFIX]
+        if candidate_rank < preferred_rank_by_threshold.get(threshold_value, 10):
+            preferred_path_by_threshold[threshold_value] = record_path
+            preferred_rank_by_threshold[threshold_value] = candidate_rank
 
     # Sort numerically by threshold so plotting and tie-breaking are reproducible.
-    return sorted(jsonl_paths, key=lambda path: (threshold_value_from_jsonl_path(path), str(path)))
+    return [preferred_path_by_threshold[threshold_value] for threshold_value in sorted(preferred_path_by_threshold)]
 
 
 def open_jsonl_text_for_reading(jsonl_path: Path):
     """Open a plain or gzipped JSONL file in text mode."""
-    # The current files are plain JSONL, but gzip support keeps the script future-compatible.
+    # Legacy bundle files may be plain JSONL or gzipped JSONL.  Current runs
+    # prefer pickle streams and reach this helper only for older outputs.
     if str(jsonl_path).endswith(".gz"):
         return gzip.open(jsonl_path, mode="rt", encoding="utf-8")
     return Path(jsonl_path).open("r", encoding="utf-8")
@@ -623,24 +693,109 @@ def open_jsonl_text_for_reading(jsonl_path: Path):
 
 def iter_combination_records_for_document(document_info: dict[str, Any]):
     """Yield full combination records for one document with their source location."""
-    # Each document bundle contains one JSONL file per threshold value.
+    # Each document bundle contains one preferred record file per threshold value.
     document_bundle_dir = Path(document_info["bundle_dir"])
 
     # Stream records; do not load full geometry for all combinations at once.
-    for jsonl_path in iter_threshold_jsonl_paths_for_document_bundle(document_bundle_dir):
-        with open_jsonl_text_for_reading(jsonl_path) as jsonl_handle:
-            for line_number, line in enumerate(jsonl_handle, start=1):
-                stripped_line = line.strip()
-                if not stripped_line:
-                    continue
+    for record_path in iter_threshold_record_paths_for_document_bundle(document_bundle_dir):
+        yield from iter_combination_records_from_path(record_path)
 
-                # Skip partial JSON lines that can exist while a job is still writing.
-                try:
-                    combination_record = json.loads(stripped_line)
-                except json.JSONDecodeError:
-                    continue
 
-                yield combination_record, jsonl_path, line_number
+def iter_combination_records_from_path(record_path: Path):
+    """Yield combination records from one threshold stream with stable record numbers."""
+    # Pickle streams use one-based record numbers in the same role that JSONL
+    # line numbers used before: a stable pointer to a selected geometry record.
+    if str(record_path).endswith(PICKLE_STREAM_SUFFIX):
+        for combination_record, record_number in iter_pickle_stream_records(record_path):
+            yield combination_record, Path(record_path), int(record_number)
+        return
+
+    with open_jsonl_text_for_reading(record_path) as jsonl_handle:
+        for line_number, line in enumerate(jsonl_handle, start=1):
+            stripped_line = line.strip()
+            if not stripped_line:
+                continue
+
+            # Skip partial JSON lines that can exist while a job is still writing.
+            try:
+                combination_record = json.loads(stripped_line)
+            except json.JSONDecodeError:
+                continue
+
+            yield combination_record, Path(record_path), int(line_number)
+
+
+def combination_score_table_path_for_document(document_info: dict[str, Any]) -> Path:
+    """Return the shard-local compact score-table path for one bundle document."""
+    document_bundle_dir = Path(document_info["bundle_dir"])
+    shard_output_dir = document_bundle_dir.parent.parent
+    return shard_output_dir / COMBINATION_SCORE_TABLE_FILENAME
+
+
+def read_score_table_for_visualization(
+    score_table_path: Path,
+    score_table_cache_by_path: dict[Path, pd.DataFrame],
+) -> pd.DataFrame:
+    """Load the scalar score table columns needed by visual diagnostics."""
+    cached_score_table = score_table_cache_by_path.get(score_table_path)
+    if cached_score_table is not None:
+        return cached_score_table
+
+    print(f"[score-table] source=combination_scores path={score_table_path}")
+    score_table_dataframe = pd.read_csv(
+        score_table_path,
+        compression="gzip",
+        low_memory=False,
+        usecols=lambda column_name: column_name in SCORE_TABLE_COLUMNS_REQUIRED_FOR_VISUALS,
+    )
+    score_table_cache_by_path[score_table_path] = score_table_dataframe
+    return score_table_dataframe
+
+
+def extract_compact_metric_row_from_score_table_row(
+    *,
+    score_row: pd.Series,
+    source_jsonl_path: Path | None,
+    source_line_number: int | None,
+    document_info: dict[str, Any],
+) -> dict[str, Any]:
+    """Convert one compact score-table row into the visual tool DataFrame schema."""
+    hallucination = safe_float_or_nan(score_row.get("hallucination"))
+    non_hallucination = float("nan") if math.isnan(hallucination) else max(0.0, min(1.0, 1.0 - hallucination))
+    hough_seed = safe_int_or_none(score_row.get("hough_seed"))
+    document_index = safe_int_or_none(score_row.get("doc_index"))
+    effective_hough_seed = None if hough_seed is None or document_index is None else int(hough_seed + document_index)
+
+    return {
+        "main_language": document_info.get("main_language"),
+        "document_type": document_info.get("document_type"),
+        "document_index": document_index,
+        "fname": score_row.get("fname") or document_info.get("fname"),
+        "bundle_dir": str(document_info["bundle_dir"]),
+        "shard_index": document_info.get("shard_index"),
+        "whole_document_nls": safe_float_or_nan(score_row.get("whole_document_nls")),
+        "hough_threshold": safe_int_or_none(score_row.get("hough_threshold")),
+        "hough_line_length": safe_int_or_none(score_row.get("hough_line_length")),
+        "hough_line_gap": safe_int_or_none(score_row.get("hough_line_gap")),
+        "hough_seed": hough_seed,
+        "effective_hough_seed": effective_hough_seed,
+        "tuning_score": safe_float_or_nan(score_row.get("tuning_score")),
+        "weighted_along_lines_nls": safe_float_or_nan(score_row.get("weighted_along_lines_nls")),
+        "correct_ref_coverage": safe_float_or_nan(score_row.get("correct_ref_coverage")),
+        "missing_ref_coverage": safe_float_or_nan(score_row.get("missing_ref_coverage")),
+        "repetition_on_ref": safe_float_or_nan(score_row.get("repetition_on_ref")),
+        "hallucination": hallucination,
+        "non_hallucination": non_hallucination,
+        "raw_line_count": safe_float_or_nan(score_row.get("raw_line_count")),
+        "candidate_line_count": safe_float_or_nan(score_row.get("candidate_line_count")),
+        "used_line_count": safe_float_or_nan(score_row.get("used_line_count")),
+        "line_guided_columns": safe_float_or_nan(score_row.get("line_guided_columns")),
+        "fallback_columns": safe_float_or_nan(score_row.get("fallback_columns")),
+        "is_valid": bool(safe_int_or_none(score_row.get("is_valid"))),
+        "invalid_reason": score_row.get("invalid_reason"),
+        "source_jsonl_path": "" if source_jsonl_path is None else str(source_jsonl_path),
+        "source_line_number": 0 if source_line_number is None else int(source_line_number),
+    }
 
 
 def extract_compact_metric_row_from_combination_record(
@@ -701,7 +856,7 @@ def load_language_document_type_metrics_dataframe(
     max_documents: int | None,
 ) -> tuple[pd.DataFrame, list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
     """Load one compact DataFrame for one selected language/document-type pair."""
-    # Find loadable documents using direct shard lookup before reading any threshold JSONL.
+    # Find loadable documents before reading any threshold record streams.
     loadable_documents, skipped_documents = split_documents_by_bundle_availability_and_prediction(
         runfile_documents=runfile_documents,
         shards_dir=shards_dir,
@@ -711,8 +866,9 @@ def load_language_document_type_metrics_dataframe(
     # The user-controlled max_documents applies to loadable documents only.
     documents_to_load = loadable_documents if max_documents is None else loadable_documents[: int(max_documents)]
 
-    # Store compact rows only; never retain all full JSONL records.
+    # Store compact scalar rows only; never retain all full geometry records.
     compact_rows: list[dict[str, Any]] = []
+    score_table_cache_by_path: dict[Path, pd.DataFrame] = {}
 
     # Load each selected document in order.
     for document_position, document_info in enumerate(documents_to_load, start=1):
@@ -722,7 +878,34 @@ def load_language_document_type_metrics_dataframe(
             f"document_index={document_info['document_index']}, fname={document_info['fname']}"
         )
 
-        # Stream every combination and immediately reduce it to scalar fields.
+        score_table_path = combination_score_table_path_for_document(document_info)
+        if score_table_path.exists():
+            score_table_dataframe = read_score_table_for_visualization(
+                score_table_path,
+                score_table_cache_by_path,
+            )
+
+            if "doc_index" not in score_table_dataframe.columns:
+                print(f"[score-table] missing doc_index column; falling back to bundle records: {score_table_path}")
+            else:
+                document_index_values = pd.to_numeric(score_table_dataframe["doc_index"], errors="coerce")
+                document_score_rows = score_table_dataframe[
+                    document_index_values == int(document_info["document_index"])
+                ]
+                if not document_score_rows.empty:
+                    for _, score_row in document_score_rows.iterrows():
+                        compact_rows.append(
+                            extract_compact_metric_row_from_score_table_row(
+                                score_row=score_row,
+                                source_jsonl_path=None,
+                                source_line_number=None,
+                                document_info=document_info,
+                            )
+                        )
+                    continue
+
+        # Legacy fallback: stream every geometry record and reduce it to scalar fields.
+        print(f"[score-table] source=combination_bundles_legacy document={document_info['document_index']}")
         for combination_record, source_jsonl_path, source_line_number in iter_combination_records_for_document(document_info):
             compact_rows.append(
                 extract_compact_metric_row_from_combination_record(
@@ -1132,13 +1315,147 @@ def plot_parameter_metric_grids_for_pair(
 # ---------------------------------------------------------------------------
 
 
-def read_jsonl_record_at_line(jsonl_path: Path, target_line_number: int) -> dict[str, Any]:
-    """Read exactly one JSONL record by 1-based source line number."""
-    with open_jsonl_text_for_reading(jsonl_path) as jsonl_handle:
+def read_combination_record_at_position(record_path: Path, target_record_number: int) -> dict[str, Any]:
+    """Read exactly one combination record from JSONL or pickle-stream storage."""
+    if str(record_path).endswith(PICKLE_STREAM_SUFFIX):
+        return read_pickle_stream_record_at_position(record_path, int(target_record_number))
+
+    with open_jsonl_text_for_reading(record_path) as jsonl_handle:
         for current_line_number, line in enumerate(jsonl_handle, start=1):
-            if current_line_number == int(target_line_number):
+            if current_line_number == int(target_record_number):
                 return json.loads(line)
-    raise ValueError(f"Could not find line {target_line_number} in {jsonl_path}")
+    raise ValueError(f"Could not find record {target_record_number} in {record_path}")
+
+
+def source_record_pointer_from_metric_row(metric_row: pd.Series) -> tuple[Path, int] | None:
+    """Return a stored geometry pointer from a metric row, or None when absent."""
+    # Scalar rows loaded from combination_scores.csv.gz usually do not carry a
+    # geometry pointer.  Winner-only rows or already-resolved best rows can.
+    source_record_value = metric_row.get("source_jsonl_path")
+    try:
+        if pd.isna(source_record_value):
+            return None
+    except TypeError:
+        pass
+    if source_record_value in (None, ""):
+        return None
+
+    source_record_number = safe_int_or_none(metric_row.get("source_line_number"))
+    if source_record_number is None or source_record_number <= 0:
+        return None
+
+    source_record_path = Path(str(source_record_value))
+    if not source_record_path.exists():
+        return None
+
+    return source_record_path, int(source_record_number)
+
+
+def combination_record_matches_metric_row(combination_record: dict[str, Any], metric_row: pd.Series) -> bool:
+    """Return True when one geometry record matches one selected metric row."""
+    # The bundle is document-local, but checking the document index catches stale
+    # or accidentally cross-linked pointers before a wrong overlay is drawn.
+    document_payload = combination_record.get("document", {}) or {}
+    record_document_index = safe_int_or_none(document_payload.get("index"))
+    row_document_index = safe_int_or_none(metric_row.get("document_index"))
+    if (
+        row_document_index is not None
+        and record_document_index is not None
+        and row_document_index != record_document_index
+    ):
+        return False
+
+    # Hough parameters define the geometry.  The final visual panel must draw
+    # the same threshold/length/gap/seed combination that won in the scalar table.
+    hough_parameters = combination_record.get("hough_parameters", {}) or {}
+    parameter_pairs = [
+        ("hough_threshold", "hough_threshold"),
+        ("hough_line_length", "hough_line_length"),
+        ("hough_line_gap", "hough_line_gap"),
+        ("hough_seed", "hough_seed"),
+    ]
+    for row_parameter_name, record_parameter_name in parameter_pairs:
+        row_parameter_value = safe_int_or_none(metric_row.get(row_parameter_name))
+        record_parameter_value = safe_int_or_none(hough_parameters.get(record_parameter_name))
+        if row_parameter_value is None:
+            continue
+        if record_parameter_value is None or row_parameter_value != record_parameter_value:
+            return False
+
+    return True
+
+
+def candidate_geometry_record_paths_for_best_row(best_row: pd.Series) -> list[Path]:
+    """Return the smallest useful set of threshold streams for one best row."""
+    document_bundle_dir = Path(str(best_row["bundle_dir"]))
+    all_record_paths = iter_threshold_record_paths_for_document_bundle(document_bundle_dir)
+    if not all_record_paths:
+        return []
+
+    # Normal all-scope bundles have one stream per threshold.  The best row's
+    # threshold lets us avoid scanning every other threshold just to draw one panel.
+    best_threshold = safe_int_or_none(best_row.get("hough_threshold"))
+    if best_threshold is None:
+        return all_record_paths
+
+    threshold_record_paths = [
+        record_path
+        for record_path in all_record_paths
+        if threshold_value_from_record_path(record_path) == best_threshold
+    ]
+    return threshold_record_paths or all_record_paths
+
+
+def resolve_combination_record_for_best_row(best_row: pd.Series) -> tuple[dict[str, Any], Path, int]:
+    """Load the geometry record that belongs to one selected best combination."""
+    # First use a stored pointer when one exists.  This is the fastest path for
+    # already-resolved rows and for legacy rows loaded directly from bundle records.
+    stored_pointer = source_record_pointer_from_metric_row(best_row)
+    if stored_pointer is not None:
+        source_record_path, source_record_number = stored_pointer
+        combination_record = read_combination_record_at_position(source_record_path, source_record_number)
+        if combination_record_matches_metric_row(combination_record, best_row):
+            return combination_record, source_record_path, source_record_number
+        print(
+            "[geometry] stored source pointer did not match selected best row; "
+            f"falling back to threshold scan: document={best_row.get('document_index')}, "
+            f"path={source_record_path}, record={source_record_number}"
+        )
+
+    # Scalar-first loading intentionally avoids reading geometry while building
+    # the 18-plot grids.  When a stitched best panel is requested, scan only the
+    # best threshold stream and stop as soon as the matching record is found.
+    searched_record_count = 0
+    for record_path in candidate_geometry_record_paths_for_best_row(best_row):
+        for combination_record, source_record_path, source_record_number in iter_combination_records_from_path(
+            record_path
+        ):
+            searched_record_count += 1
+            if combination_record_matches_metric_row(combination_record, best_row):
+                return combination_record, Path(source_record_path), int(source_record_number)
+
+    raise ValueError(
+        "Could not find geometry record for best combination "
+        f"document_index={best_row.get('document_index')}, fname={best_row.get('fname')}, "
+        f"threshold={best_row.get('hough_threshold')}, "
+        f"line_length={best_row.get('hough_line_length')}, "
+        f"line_gap={best_row.get('hough_line_gap')}, "
+        f"seed={best_row.get('hough_seed')}, "
+        f"searched_records={searched_record_count}"
+    )
+
+
+def attach_best_geometry_source_pointers(best_rows_dataframe: pd.DataFrame) -> pd.DataFrame:
+    """Return best rows with geometry source pointers resolved for visual panels."""
+    if best_rows_dataframe.empty:
+        return best_rows_dataframe
+
+    resolved_best_rows = best_rows_dataframe.copy()
+    for row_index, best_row in resolved_best_rows.iterrows():
+        _, source_record_path, source_record_number = resolve_combination_record_for_best_row(best_row)
+        resolved_best_rows.at[row_index, "source_jsonl_path"] = str(source_record_path)
+        resolved_best_rows.at[row_index, "source_line_number"] = int(source_record_number)
+    return resolved_best_rows
 
 
 def load_score_matrix_from_pickle_if_it_matches_document(
@@ -1768,11 +2085,11 @@ def render_best_combination_visual_panel(
     document_index = int(best_row["document_index"])
     document_name = str(best_row["fname"])
     document_bundle_dir = Path(str(best_row["bundle_dir"]))
-    source_jsonl_path = Path(str(best_row["source_jsonl_path"]))
-    source_line_number = int(best_row["source_line_number"])
 
-    # Reload only the selected best combination record, not all full records.
-    combination_record = read_jsonl_record_at_line(source_jsonl_path, source_line_number)
+    # Reload only the selected best combination record.  Scalar-first visual
+    # loading keeps the 18-plot grids away from geometry streams, so this helper
+    # resolves the geometry lazily only when a matrix/Hough panel is requested.
+    combination_record, _, _ = resolve_combination_record_for_best_row(best_row)
 
     # Load base matrices for no-Hough plots and ref_to_pred overlays.
     ref_to_pred_score_matrix = load_document_score_matrix(
@@ -2171,6 +2488,11 @@ def analyze_one_language_document_type_pair(
 
     # Select best rows once so the text summary, stitched panel, CSV, and manifest agree exactly.
     best_rows_dataframe = select_best_combination_rows_per_document(metrics_dataframe)
+
+    # Resolve geometry pointers only when stitched matrix/Hough panels are requested.
+    # The 18-plot grids and scalar CSV/TXT/JSON outputs use the score table alone.
+    if not args.skip_best_visual_panels and not best_rows_dataframe.empty:
+        best_rows_dataframe = attach_best_geometry_source_pointers(best_rows_dataframe)
 
     # Generate graph grids unless explicitly disabled.
     graph_grid_paths: list[Path] = []

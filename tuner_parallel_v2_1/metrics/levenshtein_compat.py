@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-"""Local Levenshtein helpers for tuner_parallel_v2.
+"""Local Levenshtein helpers for ``tuner_parallel_v2_1``.
 
 This module intentionally mirrors the C-backed Levenshtein logic from
 `text_metrics_v2_12_parallel/levenshtein_metric.py` so the tuner does not

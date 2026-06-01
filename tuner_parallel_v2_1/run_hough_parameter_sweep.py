@@ -5,7 +5,7 @@ from __future__ import annotations
 
 Users provide input/output paths, optional inclusive Hough ranges, and
 parallelism settings.  The runner executes the sweep, writes CSV/JSON artifacts,
-and generates per-document plots automatically.
+and generates visualisation artifacts only when visual output is requested.
 """
 
 import argparse
@@ -23,6 +23,7 @@ try:
     from .tuner.tuner_config import (
         DEFAULT_REF_TO_REF_COMBO_CACHE_DIR,
         DEFAULT_TEXT_METRICS_V212_DIR,
+        DEFAULT_HOUGH_START,
         HOUGH_LINE_GAP_MAX,
         HOUGH_LINE_GAP_MIN,
         HOUGH_LINE_LENGTH_MAX,
@@ -51,6 +52,7 @@ except ImportError:
     from tuner.tuner_config import (  # type: ignore
         DEFAULT_REF_TO_REF_COMBO_CACHE_DIR,
         DEFAULT_TEXT_METRICS_V212_DIR,
+        DEFAULT_HOUGH_START,
         HOUGH_LINE_GAP_MAX,
         HOUGH_LINE_GAP_MIN,
         HOUGH_LINE_LENGTH_MAX,
@@ -138,7 +140,11 @@ def parse_args() -> argparse.Namespace:
         "--text-metrics-v212-dir",
         type=Path,
         default=DEFAULT_TEXT_METRICS_V212_DIR,
-        help="Read-only text_metrics_v2_12_parallel directory used for coverage/hallucination metrics",
+        help=(
+            "Optional external text_metrics_v2_12_parallel directory for audits "
+            "and equivalence tests. Normal scoring uses the tuner-local v2.12 "
+            "compatibility code."
+        ),
     )
     parser.add_argument(
         "--ref-to-ref-cache-mode",
@@ -146,21 +152,22 @@ def parse_args() -> argparse.Namespace:
         default="auto",
         choices=("off", "auto", "read-only"),
         help=(
-            "Persistent reference-self combination cache mode. auto reads/writes exact "
-            "refref_y coverage baselines; off preserves the old recompute-every-combination path."
+            "Persistent reference-self document-pack cache mode. auto reads existing exact "
+            "refref_y coverage baselines and writes one cache file per completed document/grid; "
+            "off preserves the recompute-every-combination path."
         ),
     )
     parser.add_argument(
         "--ref-to-ref-cache-dir",
         type=Path,
         default=DEFAULT_REF_TO_REF_COMBO_CACHE_DIR,
-        help="Directory for exact ref_to_ref per-combination cache artifacts",
+        help="Directory for exact ref_to_ref document-pack cache artifacts",
     )
     parser.add_argument(
         "--ref-to-ref-cache-warm-only",
         action="store_true",
         help=(
-            "Fill the exact ref_to_ref combination cache and exit before the "
+            "Fill the exact ref_to_ref document-pack cache and exit before the "
             "prediction-side tuner. Use with --ref-to-ref-cache-mode auto."
         ),
     )
@@ -212,9 +219,36 @@ def parse_args() -> argparse.Namespace:
     )
 
     parser.add_argument("--hough-seed", type=int, default=HOUGH_SEED_MIN, help="Deprecated compatibility arg; fixed seed 1 is used")
-    parser.add_argument("--hough-start", type=float, default=2.6, help="Adaptive Hough mask threshold start")
+    parser.add_argument(
+        "--hough-start",
+        type=float,
+        default=DEFAULT_HOUGH_START,
+        help="Adaptive Hough image threshold start",
+    )
     parser.add_argument("--align-abs-min-len", type=float, default=8.0, help="Minimum candidate line length before IoU filtering")
     parser.add_argument("--align-min-iou-threshold", type=float, default=0.035, help="Minimum true-IoU threshold for line filtering")
+    parser.add_argument(
+        "--min-raw-ref-to-pred-matrix-max",
+        type=float,
+        default=None,
+        help=(
+            "Optional document-level prefilter. When set, a document is skipped "
+            "after its raw ref_to_pred score matrix is loaded if the finite "
+            "matrix maximum is below this value."
+        ),
+    )
+    parser.add_argument(
+        "--min-surviving-line-nls",
+        type=float,
+        default=None,
+        help=(
+            "Optional post-geometry text-quality filter. When set, final "
+            "ref_to_pred lines whose line-level normalized Levenshtein "
+            "similarity is below this value are removed before coverage/scoring. "
+            "If all final lines are removed, the combination is reported as a "
+            "valid zero-score 100%% hallucination outcome with an explicit reason."
+        ),
+    )
 
     parser.add_argument(
         "--hough-threshold-range",
@@ -253,7 +287,7 @@ def parse_args() -> argparse.Namespace:
         metavar=_range_metavar("SEED"),
         default=None,
         help=(
-            "Deprecated compatibility arg. Seed sweep is temporarily disabled; "
+            "Deprecated compatibility arg. Seed sweep is disabled in this tuner; "
             f"fixed seed {HOUGH_SEED_MIN} is used."
         ),
     )
@@ -261,19 +295,23 @@ def parse_args() -> argparse.Namespace:
         "--combination-bundle-dir",
         type=Path,
         default=None,
-        help="Optional directory for per-combination JSONL geometry bundles used by visualization tools",
+        help="Optional directory for per-combination binary visualization bundles",
     )
     parser.add_argument(
         "--combination-bundle-scope",
         type=str,
         default="none",
-        choices=("none", "all", "valid-only", "invalid-only"),
+        choices=("none", "all", "valid-only", "invalid-only", "winner-only"),
         help="Which evaluated combinations should be written to --combination-bundle-dir",
     )
     parser.add_argument(
         "--combination-bundle-include-candidate-lines",
         action="store_true",
-        help="Include pre-filter candidate line records in every combination bundle",
+        help=(
+            "Accepted for compatibility. Lean pklstream visualization bundles "
+            "store raw Hough lines and final surviving lines, not pre-filter "
+            "candidate geometry."
+        ),
     )
     parser.add_argument(
         "--shard-index",
@@ -285,14 +323,30 @@ def parse_args() -> argparse.Namespace:
         "--with-visuals",
         action="store_true",
         help=(
-            "Generate final colour visualisations after the sweep. This forces "
-            "full per-combination bundle logging so every graph grid can be rebuilt."
+            "Generate final colour visualisations after the sweep. If no explicit "
+            "bundle scope is provided, only winner geometry is written."
         ),
     )
     parser.add_argument(
         "--hide-line-labels",
         action="store_true",
         help="Hide raw Hough and final surviving-line labels in stitched best-combination visuals.",
+    )
+    parser.add_argument(
+        "--profile-combinations",
+        action="store_true",
+        help=(
+            "Write a compact top-level combination_profile.csv with scalar "
+            "per-combination timing/count diagnostics. Scientific scoring is unchanged."
+        ),
+    )
+    parser.add_argument(
+        "--no-combination-score-table",
+        action="store_true",
+        help=(
+            "Disable the normal top-level combination_scores.csv.gz scalar table. "
+            "Keeping it enabled makes parameter-range analysis possible without reading geometry bundles."
+        ),
     )
 
     return parser.parse_args()
@@ -347,7 +401,7 @@ def _cap_doc_workers_for_dynamic_pool(
 
 
 def main() -> None:
-    """Run the tuner and immediately generate plots."""
+    """Run the tuner and optionally generate visualisation artifacts."""
     args = parse_args()
     log = build_timestamped_logger(print)
 
@@ -397,7 +451,11 @@ def main() -> None:
         f"score_index_cache_dir={_format_path(args.score_index_cache_dir)} "
         f"disable_pkl_matrix_source={bool(args.disable_pkl_matrix_source)}"
     )
-    log(f"[v2.12-metrics] text_metrics_v212_dir={Path(args.text_metrics_v212_dir)}")
+    log(
+        "[v2.12-metrics] "
+        "runtime_source=tuner_local_compat "
+        f"external_audit_dir={Path(args.text_metrics_v212_dir)}"
+    )
     log(
         "[ref-to-ref-cache] "
         f"mode={args.ref_to_ref_cache_mode} dir={Path(args.ref_to_ref_cache_dir)} "
@@ -405,6 +463,20 @@ def main() -> None:
     )
     if selection_index_range is not None:
         log(f"[selection] selection_index_range={selection_index_range[0]}..{selection_index_range[1]}")
+    if bool(args.profile_combinations):
+        log("[profiling] combination_profile.csv export enabled")
+    if bool(args.no_combination_score_table):
+        log("[combination-scores] disabled by --no-combination-score-table")
+    if args.min_raw_ref_to_pred_matrix_max is not None:
+        if float(args.min_raw_ref_to_pred_matrix_max) < 0.0:
+            raise ValueError("--min-raw-ref-to-pred-matrix-max must be non-negative")
+        log(
+            "[document-prefilter] "
+            f"min_raw_ref_to_pred_matrix_max={float(args.min_raw_ref_to_pred_matrix_max):.6f}"
+        )
+    if args.min_surviving_line_nls is not None:
+        if not (0.0 <= float(args.min_surviving_line_nls) <= 1.0):
+            raise ValueError("--min-surviving-line-nls must be between 0.0 and 1.0")
 
     dynamic_document_pool = None
     dynamic_active_leases_by_document_index: dict[int, DocumentLease] = {}
@@ -412,6 +484,7 @@ def main() -> None:
     selected_run_items_override = None
     selected_document_count_override = None
     on_document_completed = None
+    on_document_skipped = None
     resolved_doc_workers = max(1, int(args.doc_workers))
 
     if args.dynamic_document_pool_dir is not None:
@@ -462,7 +535,25 @@ def main() -> None:
                 "will mark done after normal tuner outputs are written"
             )
 
+        def _record_dynamic_document_skip(skip_record: dict) -> None:
+            """Remember skipped leases and finalize them after skip CSV/summary output exists."""
+            document_index = int(skip_record["index"])
+            lease = dynamic_active_leases_by_document_index.pop(document_index, None)
+            if lease is None:
+                raise RuntimeError(
+                    "Dynamic document skipped without an active lease: "
+                    f"index={document_index} fname={skip_record.get('fname')}"
+                )
+            dynamic_completed_leases_waiting_for_output.append(lease)
+            log(
+                "[dynamic-pool-skip-in-memory] "
+                f"worker={resolved_worker_id} index={document_index} fname={skip_record.get('fname')} "
+                f"reason={skip_record.get('skip_reason')} "
+                "will mark done after skipped-document outputs are written"
+            )
+
         on_document_completed = _record_dynamic_document_completion
+        on_document_skipped = _record_dynamic_document_skip
         log(
             "[dynamic-pool] enabled "
             f"pool_dir={Path(args.dynamic_document_pool_dir)} worker_id={resolved_worker_id} "
@@ -473,13 +564,17 @@ def main() -> None:
     combination_bundle_scope = str(args.combination_bundle_scope)
     combination_bundle_dir = args.combination_bundle_dir
     if bool(args.with_visuals):
-        # Visual mode needs every evaluated combination so the language/type
-        # analysis can build all per-document graph grids without recomputing.
-        combination_bundle_scope = "all"
+        # The compact score table now carries scalar rows for all combinations.
+        # Visual mode therefore needs geometry only for the selected winner
+        # unless the caller explicitly requested a diagnostic all/valid/invalid
+        # bundle scope.
+        if combination_bundle_scope == "none":
+            combination_bundle_scope = "winner-only"
         if combination_bundle_dir is None:
             combination_bundle_dir = Path(args.output_dir) / "combination_bundles"
         log(
-            "[visuals] enabled; forcing combination_bundle_scope=all "
+            "[visuals] enabled "
+            f"combination_bundle_scope={combination_bundle_scope} "
             f"bundle_dir={Path(combination_bundle_dir)} "
             f"hide_line_labels={bool(args.hide_line_labels)}"
         )
@@ -516,6 +611,11 @@ def main() -> None:
             selected_run_items_override=selected_run_items_override,
             selected_document_count_override=selected_document_count_override,
             on_document_completed=on_document_completed,
+            on_document_skipped=on_document_skipped,
+            min_raw_ref_to_pred_matrix_max=args.min_raw_ref_to_pred_matrix_max,
+            min_surviving_line_nls=args.min_surviving_line_nls,
+            profile_combinations=bool(args.profile_combinations),
+            write_combination_score_table=not bool(args.no_combination_score_table),
             log_fn=log,
         )
     except Exception as exc:
@@ -571,7 +671,7 @@ def main() -> None:
         log(f"[visuals-done] manifest={visualisation_manifest.get('manifest_path')}")
     else:
         result["summary_path"] = str(summary_path)
-        log("[visuals-skip] pass --with-visuals to create final plots and full combination bundles")
+        log("[visuals-skip] pass --with-visuals to create final plots and visualisation bundles")
 
     log("")
     log(f"Summary JSON: {result['summary_path']}")
@@ -581,6 +681,17 @@ def main() -> None:
         log(f"Best per-document params JSON: {result['best_params_per_document_json_path']}")
     if result.get("all_documents_parameter_influence_csv_path"):
         log(f"All-doc parameter influence CSV: {result['all_documents_parameter_influence_csv_path']}")
+    if result.get("skipped_documents_csv_path"):
+        log(
+            f"Skipped documents CSV: {result['skipped_documents_csv_path']} "
+            f"count={int(result.get('skipped_document_count', 0))}"
+        )
+    score_table = result.get("combination_score_table", {})
+    if isinstance(score_table, dict) and score_table.get("enabled"):
+        log(f"Combination score table: {score_table.get('csv_gz_path')} rows={score_table.get('row_count')}")
+    profiling = result.get("combination_profiling", {})
+    if isinstance(profiling, dict) and profiling.get("enabled"):
+        log(f"Combination profile CSV: {profiling.get('csv_path')} rows={profiling.get('row_count')}")
     if result.get("generated_plot_root_dir"):
         log(f"Plot root directory: {result['generated_plot_root_dir']}")
     bundle_logging = result.get("combination_bundle_logging", {})
