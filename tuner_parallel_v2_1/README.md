@@ -321,7 +321,7 @@ For each Hough combination, detection calls `skimage.transform.probabilistic_hou
 - the active threshold value;
 - the active line length;
 - the active line gap;
-- deterministic `rng=np.random.default_rng(hough_seed + document_index)`;
+- deterministic `rng=np.random.default_rng(hough_seed)`;
 - theta values restricted to falling visual diagonals.
 
 The tuner defines the accepted line direction in image/matrix coordinates:

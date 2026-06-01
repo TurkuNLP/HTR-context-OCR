@@ -764,7 +764,7 @@ def extract_compact_metric_row_from_score_table_row(
     non_hallucination = float("nan") if math.isnan(hallucination) else max(0.0, min(1.0, 1.0 - hallucination))
     hough_seed = safe_int_or_none(score_row.get("hough_seed"))
     document_index = safe_int_or_none(score_row.get("doc_index"))
-    effective_hough_seed = None if hough_seed is None or document_index is None else int(hough_seed + document_index)
+    effective_hough_seed = None if hough_seed is None else int(hough_seed)
 
     return {
         "main_language": document_info.get("main_language"),

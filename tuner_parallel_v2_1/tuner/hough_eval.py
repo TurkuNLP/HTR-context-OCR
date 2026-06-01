@@ -588,7 +588,7 @@ def _detect_filter_and_build_scoring_payload(
     t_detect = time.perf_counter()
     det = detect_lines_only_from_hough_ctx(
         hough_ctx=hough_ctx,
-        seed=int(hough_seed) + int(document_index),
+        seed=int(hough_seed),
         threshold=int(hough_threshold),
         line_length=int(hough_line_length),
         line_gap=int(hough_line_gap),

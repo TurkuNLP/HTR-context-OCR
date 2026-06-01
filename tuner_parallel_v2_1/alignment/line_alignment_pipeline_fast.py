@@ -341,7 +341,7 @@ def detect_and_filter_lines_from_matrix(
 
     det = detect_lines_only_from_hough_ctx(
         hough_ctx=resolved_ctx,
-        seed=int(hough_seed) + int(item_index),
+        seed=int(hough_seed),
         threshold=int(hough_threshold),
         line_length=int(hough_line_length),
         line_gap=int(hough_line_gap),
@@ -421,7 +421,7 @@ def derive_filtered_line_endpoints(
         "hough_threshold": int(hough_threshold),
         "hough_line_length": int(hough_line_length),
         "hough_line_gap": int(hough_line_gap),
-        "hough_seed": int(hough_seed) + int(item_index),
+        "hough_seed": int(hough_seed),
         "hough_start": float(hough_start),
         "align_abs_min_len": float(align_abs_min_len),
         "align_min_iou_threshold": float(align_min_iou_threshold),

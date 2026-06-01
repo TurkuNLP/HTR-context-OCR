@@ -257,7 +257,7 @@ class CombinationBundleLogger:
                 "hough_line_length": int(hough_line_length),
                 "hough_line_gap": int(hough_line_gap),
                 "hough_seed": int(hough_seed),
-                "effective_hough_seed": int(hough_seed) + int(doc.index),
+                "effective_hough_seed": int(hough_seed),
                 "align_abs_min_len": float(align_abs_min_len),
                 "align_min_iou_threshold": float(align_min_iou_threshold),
             },

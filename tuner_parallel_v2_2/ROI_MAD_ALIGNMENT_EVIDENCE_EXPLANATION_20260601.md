@@ -737,23 +737,25 @@ raw_hough_segments_from_skimage = list(
 )
 ```
 
-The seed is made deterministic per document:
+The seed is passed literally from the active Hough parameters:
 
 ```python
 det = detect_lines_only_from_hough_ctx(
     hough_ctx=hough_ctx,
-    seed=int(hough_seed) + int(document_index),
+    seed=int(hough_seed),
     threshold=int(hough_threshold),
     line_length=int(hough_line_length),
     line_gap=int(hough_line_gap),
 )
 ```
 
-For document index `573` and `hough_seed = 1`, the effective seed is:
+For document index `573` and `hough_seed = 1`, the effective seed is still:
 
 ```text
-573 + 1 = 574
+1
 ```
+
+The document index is not added to the seed.
 
 The detector then applies an endpoint direction guard:
 

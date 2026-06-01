@@ -238,7 +238,7 @@ def test_document_session_writes_one_document_pack_after_thresholds_finish(tmp_p
     assert auto_cache.stats.as_dict()["threshold_pack_writes"] == 0
     with np.load(cache_files[0], allow_pickle=False) as compact_cache_payload:
         metadata = json.loads(str(compact_cache_payload["metadata_json"].item()))
-        assert metadata["cache_schema_version"] == "ref_to_ref_document_pack_cache_v1"
+        assert metadata["cache_schema_version"] == "ref_to_ref_document_pack_cache_v2_literal_seed"
         assert compact_cache_payload["combination_keys"].shape[1] == 4
 
 

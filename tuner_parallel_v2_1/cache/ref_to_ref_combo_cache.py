@@ -50,10 +50,10 @@ SUPPORTED_REF_TO_REF_CACHE_MODES = (
 # The v1 schema is retained only for the direct get_or_compute compatibility
 # path.  Production scheduling writes document-pack files, while the reader can
 # still reuse v3/v2 threshold packs written by earlier refactors.
-_COMBINATION_CACHE_SCHEMA_VERSION = "ref_to_ref_combo_cache_v1"
+_COMBINATION_CACHE_SCHEMA_VERSION = "ref_to_ref_combo_cache_v1_literal_seed"
 _THRESHOLD_PACK_CACHE_SCHEMA_VERSION_V2 = "ref_to_ref_threshold_pack_cache_v2"
-_THRESHOLD_PACK_CACHE_SCHEMA_VERSION = "ref_to_ref_threshold_pack_cache_v3"
-_DOCUMENT_PACK_CACHE_SCHEMA_VERSION = "ref_to_ref_document_pack_cache_v1"
+_THRESHOLD_PACK_CACHE_SCHEMA_VERSION = "ref_to_ref_threshold_pack_cache_v3_literal_seed"
+_DOCUMENT_PACK_CACHE_SCHEMA_VERSION = "ref_to_ref_document_pack_cache_v1_literal_seed"
 DEFAULT_MAX_PENDING_DOCUMENT_CACHE_WRITES = 2
 
 
@@ -255,7 +255,7 @@ def build_ref_to_ref_cache_metadata(
     align_min_iou_threshold: float,
 ) -> dict:
     """Build strict provenance metadata for one legacy reference-self cache entry."""
-    effective_hough_seed = int(hough_seed) + int(doc.index)
+    effective_hough_seed = int(hough_seed)
     return {
         "cache_schema_version": _COMBINATION_CACHE_SCHEMA_VERSION,
         "document_index": int(doc.index),
@@ -273,7 +273,7 @@ def build_ref_to_ref_cache_metadata(
         "align_abs_min_len": float(align_abs_min_len),
         "align_min_iou_threshold": float(align_min_iou_threshold),
         "skimage_version": None if skimage is None else str(skimage.__version__),
-        "semantics": "v2_12_falling_hough_true_iou_reference_self_exact",
+        "semantics": "v2_12_falling_hough_true_iou_reference_self_exact_literal_seed",
     }
 
 
@@ -292,9 +292,9 @@ def build_ref_to_ref_threshold_pack_metadata(
     normalized_seed_values = [int(seed) for seed in seed_values]
     cache_schema_version = str(cache_schema_version)
     semantics = (
-        "v2_12_falling_hough_true_iou_reference_self_exact_threshold_pack"
+        "v2_12_falling_hough_true_iou_reference_self_exact_threshold_pack_legacy_offset_seed"
         if cache_schema_version == _THRESHOLD_PACK_CACHE_SCHEMA_VERSION_V2
-        else "v2_12_falling_hough_true_iou_reference_self_exact_threshold_pack_compact"
+        else "v2_12_falling_hough_true_iou_reference_self_exact_threshold_pack_compact_literal_seed"
     )
     return {
         "cache_schema_version": cache_schema_version,
@@ -309,7 +309,7 @@ def build_ref_to_ref_threshold_pack_metadata(
         "hough_line_length_values": [int(value) for value in line_length_values],
         "hough_line_gap_values": [int(value) for value in line_gap_values],
         "hough_seed_values": normalized_seed_values,
-        "effective_hough_seed_values": [int(seed) + int(doc.index) for seed in normalized_seed_values],
+        "effective_hough_seed_values": [int(seed) for seed in normalized_seed_values],
         "align_abs_min_len": float(align_abs_min_len),
         "align_min_iou_threshold": float(align_min_iou_threshold),
         "skimage_version": None if skimage is None else str(skimage.__version__),
@@ -342,11 +342,11 @@ def build_ref_to_ref_document_pack_metadata(
         "hough_line_length_values": [int(value) for value in line_length_values],
         "hough_line_gap_values": [int(value) for value in line_gap_values],
         "hough_seed_values": normalized_seed_values,
-        "effective_hough_seed_values": [int(seed) + int(doc.index) for seed in normalized_seed_values],
+        "effective_hough_seed_values": [int(seed) for seed in normalized_seed_values],
         "align_abs_min_len": float(align_abs_min_len),
         "align_min_iou_threshold": float(align_min_iou_threshold),
         "skimage_version": None if skimage is None else str(skimage.__version__),
-        "semantics": "v2_12_falling_hough_true_iou_reference_self_exact_document_pack_compact",
+        "semantics": "v2_12_falling_hough_true_iou_reference_self_exact_document_pack_compact_literal_seed",
     }
 
 
