@@ -26,7 +26,11 @@ setup(
                 name="cython_accel.ownership_core",
                 sources=[str(THIS_DIR / "ownership_core.pyx")],
                 include_dirs=[np.get_include()],
-            )
+            ),
+            Extension(
+                name="cython_accel.filter_core",
+                sources=[str(THIS_DIR / "filter_core.pyx")],
+            ),
         ],
         compiler_directives={"language_level": "3"},
     ),

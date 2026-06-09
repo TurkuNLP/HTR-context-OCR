@@ -765,3 +765,19 @@ Validation after implementation:
 - `python3 -m pytest --confcutdir=tuner_simple tuner_simple/tests -q` passed with 11 tests.
 - A one-document Finnish smoke run completed successfully with the requested Hough and score-floor settings.
 - A synthetic ownership-loop comparison showed identical Python and Cython assignments, identical owned-column counts, and about 42x faster runtime for the Cython ownership loop on the synthetic matrix.
+
+## 2026-06-09 Implementation Update: Exact v2.2 True-IoU Filtering In tuner_simple
+
+The previous `tuner_simple` Hough filter used a simplified nearest-column ownership implementation. That was not equivalent to `tuner_parallel_v2_2`, and it meant `--align-min-iou-threshold` was parsed, logged, and written to CSV, but did not actually control true Intersection over Union filtering.
+
+The current implementation now ports the focused `tuner_parallel_v2_2/filtering/` package into `tuner_simple/filtering/` as local code. `tuner_simple/probabilistic_hough/hough_detection.py` now converts raw Hough segments into v2.2 line records and calls `filter_lines_for_alignment_by_ownership()` with `min_iou_threshold=align_min_iou_threshold`. This restores the intended production behavior: raw Hough candidates are prepared, sampled into matrix paths, compared by exact set Intersection over Union on prediction and reference coverage, merged into overlap components, then assigned to prediction columns with the v2.2 final ownership rule.
+
+The Cython helper `filter_core.pyx` was also ported into `tuner_simple/cython_accel/`, and the local build script now builds both `ownership_core` and `filter_core`. The old simplified ownership helper remains only as a testable fallback utility; it is no longer the production Hough filtering path.
+
+Validation after implementation:
+
+- `python3 -m compileall -q tuner_simple` passed.
+- `python3 -m pytest --confcutdir=tuner_simple tuner_simple/tests -q` passed with 13 tests.
+- New tests prove that changing `align_min_iou_threshold` changes true-IoU merging behavior.
+- `cython_filtering_helpers_available`, `cython_line_sampling_available`, and `cython_final_assignment_available` all returned `True` after building the Cython extension.
+- A one-document Finnish smoke run completed successfully with `--align-min-iou-threshold 0.035` and the requested fixed Hough settings.

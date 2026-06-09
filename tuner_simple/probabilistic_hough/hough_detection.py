@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-"""Local probabilistic Hough detection and line ownership filtering."""
+"""Local probabilistic Hough detection plus v2.2 true-IoU line filtering."""
 
 from dataclasses import dataclass
 import math
@@ -10,9 +10,11 @@ from typing import Any
 import numpy as np
 from skimage.transform import probabilistic_hough_line
 
+from tuner_simple.alignment.hough_segment_endpoint_records import line_records_from_raw_hough_segments
 from tuner_simple.cython_accel.optional_ownership import (
     assign_columns_to_candidate_lines_with_optional_accelerator,
 )
+from tuner_simple.filtering.line_filtering_v2_1_IoU_fast import filter_lines_for_alignment_by_ownership
 
 from .hough_input import build_simple_hough_context
 
@@ -79,25 +81,6 @@ def line_y_at_x(line_record: dict, x_position: float) -> float | None:
     return float(line_record["y0"] + interpolation_fraction * (line_record["y1"] - line_record["y0"]))
 
 
-def raw_segment_to_line_record(
-    *,
-    raw_segment: tuple[tuple[float, float], tuple[float, float]],
-    raw_line_id: int,
-) -> dict:
-    """Convert one canonical raw Hough segment into the dictionary shape used downstream."""
-    (x0, y0), (x1, y1) = raw_segment
-    line_length = math.hypot(float(x1) - float(x0), float(y1) - float(y0))
-    return {
-        "raw_line_id": int(raw_line_id),
-        "source_raw_line_ids": [int(raw_line_id)],
-        "x0": float(x0),
-        "y0": float(y0),
-        "x1": float(x1),
-        "y1": float(y1),
-        "length": float(line_length),
-    }
-
-
 def detect_falling_diagonal_hough_lines(
     *,
     hough_context: dict,
@@ -150,7 +133,7 @@ def assign_columns_to_candidate_lines_with_python_reference(
     voter_mask: np.ndarray,
     candidate_lines: list[dict],
 ) -> dict[str, np.ndarray]:
-    """Assign columns with the readable Python implementation used as the fallback."""
+    """Assign columns with the old readable fallback kept only for accelerator tests."""
     matrix = np.asarray(score_matrix, dtype=float)
     mask = np.asarray(voter_mask, dtype=bool)
     row_count, column_count = matrix.shape if matrix.ndim == 2 else (0, 0)
@@ -201,7 +184,7 @@ def assign_columns_to_candidate_lines(
     voter_mask: np.ndarray,
     candidate_lines: list[dict],
 ) -> tuple[dict[str, np.ndarray], str]:
-    """Use the compiled ownership scan when available, otherwise use Python."""
+    """Use the old compiled ownership scan when available, otherwise use Python."""
     accelerated_result = assign_columns_to_candidate_lines_with_optional_accelerator(
         score_matrix=score_matrix,
         voter_mask=voter_mask,
@@ -217,83 +200,50 @@ def assign_columns_to_candidate_lines(
     ), "python"
 
 
-def compact_owned_candidate_lines(
-    *,
-    candidate_lines: list[dict],
-    mapped_y: np.ndarray,
-    mapped_candidate_id: np.ndarray,
-    owned_counts: np.ndarray,
-) -> tuple[list[dict], dict[str, np.ndarray]]:
-    """Drop candidates that own no columns and rewrite ids to compact final ids."""
-    column_count = int(mapped_candidate_id.shape[0])
-    final_lines: list[dict] = []
-    candidate_to_final_id: dict[int, int] = {}
-
-    for candidate_id, line_record in enumerate(candidate_lines):
-        if int(owned_counts[int(candidate_id)]) <= 0:
-            continue
-
-        owned_columns = [int(column_index) for column_index in np.flatnonzero(mapped_candidate_id == int(candidate_id))]
-        final_line = dict(line_record)
-        final_line["owned_columns"] = owned_columns
-        final_line["owned_column_count"] = int(len(owned_columns))
-        candidate_to_final_id[int(candidate_id)] = int(len(final_lines))
-        final_lines.append(final_line)
-
-    compact_mapped_line_id = np.full(column_count, -1, dtype=int)
-    for column_index, candidate_id in enumerate(mapped_candidate_id):
-        if int(candidate_id) < 0:
-            continue
-        compact_mapped_line_id[int(column_index)] = int(candidate_to_final_id.get(int(candidate_id), -1))
-
-    compact_mapped_y = np.asarray(mapped_y, dtype=float).copy()
-    compact_mapped_y[compact_mapped_line_id < 0] = np.nan
-    return final_lines, {"mapped_y": compact_mapped_y, "mapped_line_id": compact_mapped_line_id}
-
-
 def filter_lines_by_column_ownership(
     *,
     score_matrix: np.ndarray,
     detection_result: dict,
     hough_input_mask: np.ndarray,
     align_abs_min_len: float,
+    align_min_iou_threshold: float,
 ) -> dict:
-    """Assign each prediction column to the strongest candidate line that crosses it."""
+    """Run the v2.2 true-IoU ownership filter on raw Hough segments."""
     matrix = np.asarray(score_matrix, dtype=float)
-    voter_mask = np.asarray(hough_input_mask, dtype=bool)
     row_count, column_count = matrix.shape if matrix.ndim == 2 else (0, 0)
+    candidate_segments = list(detection_result.get("candidate_segments", []) or [])
+    lines_for_filtering = line_records_from_raw_hough_segments(matrix, candidate_segments)
 
-    candidate_lines: list[dict] = []
-    for raw_line_id, raw_segment in enumerate(detection_result.get("candidate_segments", []) or []):
-        line_record = raw_segment_to_line_record(raw_segment=raw_segment, raw_line_id=int(raw_line_id))
-        if float(line_record["length"]) >= float(align_abs_min_len):
-            candidate_lines.append(line_record)
-
-    if row_count <= 0 or column_count <= 0 or not candidate_lines:
+    if row_count <= 0 or column_count <= 0 or not lines_for_filtering:
         return {
             "lines_used": [],
             "column_assignment": empty_column_assignment(column_count),
-            "lines_for_filtering": candidate_lines,
-            "ownership_backend": "none",
+            "lines_for_filtering": lines_for_filtering,
+            "ownership_backend": "true_iou_none",
+            "filtered_by": "true_iou_v2_2",
         }
 
-    ownership_result, ownership_backend = assign_columns_to_candidate_lines(
-        score_matrix=matrix,
-        voter_mask=voter_mask,
-        candidate_lines=candidate_lines,
-    )
-    final_lines, column_assignment = compact_owned_candidate_lines(
-        candidate_lines=candidate_lines,
-        mapped_y=np.asarray(ownership_result["mapped_y"], dtype=float),
-        mapped_candidate_id=np.asarray(ownership_result["mapped_candidate_id"], dtype=int),
-        owned_counts=np.asarray(ownership_result["owned_counts"], dtype=int),
+    cached_mask_bool = detection_result.get("mask_bool")
+    if cached_mask_bool is None:
+        mask_bool = np.asarray(hough_input_mask, dtype=bool)
+    else:
+        mask_bool = np.asarray(cached_mask_bool, dtype=bool)
+
+    lines_used, column_assignment = filter_lines_for_alignment_by_ownership(
+        lines_for_filtering,
+        matrix,
+        mask_bool,
+        abs_min_len=float(align_abs_min_len),
+        min_iou_threshold=float(align_min_iou_threshold),
     )
 
     return {
-        "lines_used": final_lines,
+        "lines_used": list(lines_used),
         "column_assignment": column_assignment,
-        "lines_for_filtering": candidate_lines,
-        "ownership_backend": ownership_backend,
+        "lines_for_filtering": lines_for_filtering,
+        "ownership_backend": "true_iou_v2_2",
+        "filtered_by": "true_iou_v2_2",
+        "align_min_iou_threshold": float(align_min_iou_threshold),
     }
 
 
@@ -309,7 +259,7 @@ def run_probabilistic_hough_and_filter(
     align_abs_min_len: float,
     align_min_iou_threshold: float,
 ) -> HoughFilteredPayload:
-    """Run local Hough detection and local ownership filtering once."""
+    """Run local Hough detection and v2.2 true-IoU filtering once."""
     hough_context = build_simple_hough_context(hough_input_mask=hough_input_mask, score_floor=float(score_floor))
 
     detect_started_at = time.perf_counter()
@@ -328,6 +278,7 @@ def run_probabilistic_hough_and_filter(
         detection_result=detection_result,
         hough_input_mask=np.asarray(hough_input_mask, dtype=bool),
         align_abs_min_len=float(align_abs_min_len),
+        align_min_iou_threshold=float(align_min_iou_threshold),
     )
     filter_seconds = time.perf_counter() - filter_started_at
 
