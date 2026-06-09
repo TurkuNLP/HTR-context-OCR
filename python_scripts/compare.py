@@ -16,7 +16,12 @@ import numpy as np
 import sacrebleu
 import tqdm
 
-from text_metrics_v2_12_parallel.levenshtein_metric import normalized_levenshtein_similarity
+from rapidfuzz.distance import Levenshtein as _RapidfuzzLevenshtein
+
+
+def normalized_levenshtein_similarity(predicted_text, reference_text):
+    """Return normalized Levenshtein similarity in the unit interval using rapidfuzz."""
+    return float(_RapidfuzzLevenshtein.normalized_similarity(str(predicted_text), str(reference_text)))
 
 SINGLE_METRIC_NAMES = ("chrf", "bleu", "levenshtein")
 COMPARISON_MODES = ("ref-pred", "ref-ref", "pred-pred")

@@ -14,7 +14,7 @@ set -euo pipefail
 find_repo_root_from() {
   local search_dir="$1"
   while [[ -n "${search_dir}" && "${search_dir}" != "/" ]]; do
-    if [[ -f "${search_dir}/python_scripts/compare.py" && -d "${search_dir}/text_metrics_v2_12_parallel" ]]; then
+    if [[ -f "${search_dir}/python_scripts/compare.py" ]]; then
       printf '%s\n' "${search_dir}"
       return 0
     fi
