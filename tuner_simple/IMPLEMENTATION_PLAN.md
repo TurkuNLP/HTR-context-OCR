@@ -1,1502 +1,767 @@
-# tuner_simple atomic worker implementation plan
+# tuner_simple v2.12 Coverage Metric Implementation Plan
 
-## Current Decision
+## Goal
 
-`tuner_simple` will stay a simple fixed-parameter pipeline. It will not become a
-Hough grid tuner and it will not add Python multiprocessing inside one worker.
+Implement the coverage and hallucination metrics in `tuner_simple/` using the
+same geometric character-coverage logic used by
+`text_metrics_v2_12_parallel/`, while keeping the current `tuner_simple`
+handling for impossible reference-axis subtraction values.
 
-The new execution model is:
+The target behavior is:
 
 ```text
-many Slurm workers
-one claimed document per worker at a time
-one fixed Hough parameter set
-score-floor mask passed directly to Hough
-bucketed result rows appended to shared CSV logs
-final aggregation for summaries and stitched plots
+1. Keep the simple fixed-parameter tuner.
+2. Keep the current Hough input and Hough filtering behavior.
+3. Keep the current line-level Levenshtein filter.
+4. Compute coverage metrics from final line geometry, not from column ownership.
+5. Compare ref-to-pred reference coverage against ref-to-ref reference coverage.
+6. Compute hallucination from prediction characters not crossed by final ref-to-pred lines.
+7. Preserve the current tuner_simple invalid handling when y_diff < -1.
+8. Avoid importing any code from text_metrics_v2_12_parallel.
+9. Keep computation small, local, and easy to explain.
 ```
 
-Important terminology:
+The final metric names stay unchanged:
 
 ```text
-worker = one Slurm job submitted by the atomic launcher
+document_normalised_levenshtein
+weighted_along_lines_normalised_levenshtein
+correct_ref_coverage
+missing_ref_coverage
+repetition_on_reference
+hallucination
 ```
 
-Do not call these workers shards in new code, logs, documentation, or command
-help. The old parallel tuner used shard language, but the new simple pipeline is
-not doing fixed static shards. Workers dynamically claim documents as they become
-free.
+No `alignment_selection_score`, `score_matrix_support`, `line_guided_fraction`,
+`selection_objective`, or `tuning_score` should be calculated or written.
 
 
-## Current tuner_simple Status
+## Source Of Truth From text_metrics_v2_12_parallel
 
-The current `tuner_simple` already has these core pieces:
+The original metric pipeline separates two ideas that must not be mixed:
 
-1. Self-contained package:
-
-   ```text
-   /scratch/project_2017385/dorian/Churro_copy/tuner_simple
-   ```
-
-2. Main Python entry point:
-
-   ```text
-   tuner_simple/run_tuner_simple.py
-   ```
-
-3. Current shell runner:
-
-   ```text
-   tuner_simple/run_tunner.sh
-   ```
-
-4. Runfile loading and document selection:
-
-   ```text
-   tuner_simple/document_selection/runfile_loader.py
-   tuner_simple/document_selection/document_filters.py
-   ```
-
-5. Score-matrix loading from pickle streams, with in-memory pickle indexes built
-   once per process:
-
-   ```text
-   tuner_simple/matrix_operations/matrix_loader.py
-   tuner_simple/matrix_operations/score_pkl_index.py
-   ```
-
-6. Levenshtein score-matrix fallback computation when a pickle matrix is missing
-   or invalid:
-
-   ```text
-   tuner_simple/matrix_operations/matrix_fallback_computation.py
-   ```
-
-7. Current score floor:
-
-   ```text
-   score_floor = score_mean + score_floor_alpha * score_standard_deviation
-   ```
-
-   implemented in:
-
-   ```text
-   tuner_simple/matrix_operations/score_floor.py
-   ```
-
-8. Region of Interest is disabled in active `tuner_simple` code. The final Hough
-   input is the score-floor mask directly:
-
-   ```text
-   hough_input_mask = score_matrix >= score_floor
-   ```
-
-9. One fixed probabilistic Hough parameter set per run:
-
-   ```text
-   hough_threshold
-   hough_line_length
-   hough_line_gap
-   hough_seed
-   ```
-
-   The Hough seed is the actual integer passed by `--hough-seed`, defaulting to
-   `1`. It is not `document_index + 1`.
-
-10. Falling-diagonal Hough detection and line ownership filtering:
-
-    ```text
-    tuner_simple/probabilistic_hough/hough_detection.py
-    tuner_simple/probabilistic_hough/hough_input.py
-    ```
-
-11. Line-level normalized Levenshtein filtering:
-
-    ```text
-    tuner_simple/scoring/line_text_similarity.py
-    ```
-
-12. Public metrics:
-
-    ```text
-    document_normalised_levenshtein
-    weighted_along_lines_normalised_levenshtein
-    correct_ref_coverage
-    missing_ref_coverage
-    repetition_on_reference
-    hallucination
-    ```
-
-13. Current direct-run flat outputs:
-
-    ```text
-    tuner_simple/results_writing/flat_csv_tables.py
-    ```
-
-14. Current plot rendering and stitched language panels:
-
-    ```text
-    tuner_simple/plotting/document_panel_renderer.py
-    tuner_simple/plotting/stitched_language_panels.py
-    ```
-
-15. Timestamped logging:
-
-    ```text
-    tuner_simple/logging_utils/timestamped_logging.py
-    ```
-
-16. Current tests:
-
-    ```text
-    tuner_simple/tests/
-    ```
-
-The missing part is dynamic multi-worker execution with safe shared progress and
-resume support.
-
-
-## Why Atomic Workers Are Needed
-
-A single serial run processes selected documents in order inside one process. If
-one document is much slower than the others, the whole run waits behind it.
-
-With atomic workers, the selected documents remain in one ordered queue:
-
-```text
-document_000000
-document_000001
-document_000002
-...
-```
-
-If there are five workers, the first five available documents are claimed by the
-five workers. If two of those workers are still running long documents and three
-finish quickly, the three free workers claim the next three available documents.
-
-So with `n` workers:
-
-```text
-at launch: next n documents are claimed
-while running: next k documents are claimed by the k workers that become free
-```
-
-The assignment is dynamic and completion-order driven. This gives better load
-balancing while keeping each worker simple.
-
-
-## Core Architecture
-
-Use two separate mechanisms:
-
 ```text
-1. Atomic JSON files for scheduling only.
-2. Bucketed locked CSV appends for result rows.
+line ownership       -> used for line-guided Levenshtein text extraction
+line geometry        -> used for coverage, repetition, missing reference, hallucination
 ```
-
-This is the agreed compromise.
 
-Scheduling should use small JSON files because atomic file rename is simple and
-safe for ownership:
+The important original files are:
 
 ```text
-available/document_000123.json
-  -> claimed/document_000123.worker_004.pid_12345.json
-  -> done/document_000123.json
+text_metrics_v2_12_parallel/pipeline/process_single_document_metrics.py
+text_metrics_v2_12_parallel/line_metric_bundle.py
+text_metrics_v2_12_parallel/shared/project_line_to_text_windows.py
+text_metrics_v2_12_parallel/line_coverage_subtract.py
 ```
-
-Results should not be stored as one JSON file per document. Instead, each worker
-collects completed document rows in a small in-memory bucket and periodically
-appends those rows to shared CSV logs under a lock.
-
-This gives:
 
-- no thousands of per-document JSON result files;
-- fewer disk writes than appending after every document;
-- visible progress during the run;
-- small bounded memory use;
-- safe document ownership;
-- clean final CSVs after aggregation;
-- resume support after worker or job failure.
+The original data flow is:
 
-
-## Borrowed Concept from tuner_parallel_v2_2
-
-Borrow only the dynamic document-pool idea from:
-
 ```text
-tuner_parallel_v2_2/dynamic_pool/document_pool.py
-tuner_parallel_v2_2/dynamic_pool/initialize_document_pool.py
-```
+final ref-to-pred lines
+  -> sample each line across matrix coordinates
+  -> convert crossed x/y window ids into character intervals
+  -> accumulate per-character counts
+  -> produce other_y and other_x
 
-Do not import those modules. The new implementation must live inside
-`tuner_simple`.
+final ref-to-ref lines
+  -> sample each line across matrix coordinates
+  -> convert crossed y window ids into reference-character intervals
+  -> accumulate per-character counts
+  -> produce refref_y
 
-The useful idea is:
-
-```text
-same-filesystem rename is atomic
+y_diff = other_y - refref_y
 ```
-
-A worker claims a document by renaming exactly one file from `available/` into
-`claimed/`. If another worker tries to claim the same file, the file is already
-gone, so that second worker moves to the next available file.
-
-
-## What Must Not Be Copied
-
-Do not copy these parts of `tuner_parallel_v2_2`:
-
-1. Hough parameter grid.
-2. Threshold-worker multiprocessing.
-3. Per-node document concurrency.
-4. Reference-to-reference combination cache.
-5. Region of Interest preprocessing.
-6. Combination bundles.
-7. Selection objectives such as `tuning_score`.
-8. Metrics such as `score_matrix_support` and `line_guided_fraction`.
-9. Shard naming in user-facing code.
-
-`tuner_simple` atomic mode is only dynamic scheduling plus bucketed result
-writing.
-
 
-## New File Structure
+The original metric categories are:
 
-Add:
-
 ```text
-tuner_simple/dynamic_pool/
-  __init__.py
-  document_pool.py
-  initialize_document_pool.py
-  pool_status.py
+missing_ref_coverage      = count(y_diff == -1) / reference_character_count
+correct_ref_coverage      = count(y_diff == 0)  / reference_character_count
+repetition_on_reference   = count(y_diff > 0)   / reference_character_count
+hallucination             = count(other_x == 0) / prediction_character_count
 ```
 
-Add:
-
-```text
-tuner_simple/results_writing/locked_csv_bucket.py
-```
+The critical point is that these ratios are character-level ratios. They are not
+window-level ratios and they are not simple counts of assigned matrix columns.
 
-Add:
 
-```text
-tuner_simple/serial_runner/dynamic_worker_runner.py
-```
+## Current tuner_simple Situation
 
-Add:
+The current `tuner_simple/scoring/coverage_count_metrics.py` is already close to
+the required idea because it:
 
 ```text
-tuner_simple/results_writing/dynamic_result_aggregation.py
+1. samples final line endpoints;
+2. converts crossed windows into merged character intervals;
+3. accumulates character counts with a difference-array method;
+4. subtracts ref-to-ref reference counts from ref-to-pred reference counts;
+5. treats y_diff < -1 as invalid instead of raising.
 ```
-
-Add:
 
-```text
-tuner_simple/aggregate_dynamic_outputs.py
-```
+However, the implementation still needs to be made cleaner and more explicit
+because the surrounding payload names and comments can mislead a reader into
+thinking coverage is based on ownership arrays.
 
-Add:
+The risky points are:
 
 ```text
-tuner_simple/plotting/atomic_panel_writer.py
-```
+1. DirectionScoringPayload says "local ownership payload", but coverage must not
+   be understood as ownership-based.
 
-Add shell entry points:
+2. build_direction_scoring_payload() stores column_assignment because line-text
+   scoring needs it, but coverage_count_metrics.py should ignore it.
 
-```text
-tuner_simple/run_tunner_atomic.sh
-tuner_simple/run_tunner_atomic_worker.sbatch
-```
+3. refref_y is currently stored on DirectionScoringPayload but is not used by
+   compute_coverage_count_metrics().
 
-Optional later recovery helper:
+4. Existing comments say "reference windows" and "prediction windows" in places
+   where the metric is actually character-level.
 
-```text
-tuner_simple/dynamic_pool/requeue_claimed_documents.py
+5. The current tests are too small to protect the distinction between line
+   geometry and column ownership.
 ```
 
-Do not add it in the first implementation unless resume testing proves it is
-needed as a separate command.
+The implementation work should therefore be a careful cleanup and hardening, not
+a large redesign.
 
 
-## Output Directory Layout
+## Required Mathematical Semantics
 
-Atomic run output should look like:
+For one document, define:
 
 ```text
-<output-dir>/
-  atomic_run_manifest.json
-  launch_commands.sh
-  logs/
-  locks/
-  document_pool/
-    available/
-    claimed/
-    done/
-    failed/
-    events.jsonl
-    selected_documents.jsonl
-    document_pool_manifest.json
-  progress_csv/
-    document_completion_attempts.csv
-  plots/
-    document_panels/
-      <language>/
-        document_000123_<safe-fname>.png
-    stitched_best_combination_<language>_documents.png
-  best_combination_per_document.csv
-  compact_combination_metrics.csv
-  loadable_documents.csv
-  loaded_documents.csv
-  runfile_documents.csv
-  skipped_documents.csv
-  document_type_summary.csv
-  run_summary.json
-  aggregation_manifest.json
+reference_text_length = number of characters in the reference text
+prediction_text_length = number of characters in the prediction text
+window_size = sliding score-window size
+window_stride = sliding score-window stride
 ```
 
-The key difference from the previous plan is:
+The number of windows on one text axis is:
 
 ```text
-No per-document result JSON files.
-```
-
-The only per-document JSON files are scheduling files in `document_pool/`.
-
-
-## Document Pool State
-
-Each scheduling file should contain only metadata needed to claim work:
-
-```json
-{
-  "pool_ordinal": 123,
-  "document_index": 456,
-  "fname": "some_document.jpeg"
-}
+window_count = 0, if text_length < window_size
+window_count = floor((text_length - window_size) / window_stride) + 1, otherwise
 ```
-
-Definitions:
-
-- `pool_ordinal` is the document position inside the selected list for this run.
-- `document_index` is the original index from `outputs.json`.
-- `fname` is the basename for readable logs and validation.
 
-Pool states:
+For each final line:
 
 ```text
-available/ = document has not been claimed yet
-claimed/   = document is currently owned by one worker
-done/      = document result was written and lease was finalized
-failed/    = worker marked this document as failed before normal completion
-```
+1. Read its matrix endpoints:
+   (x0, y0), (x1, y1)
 
-A worker must mark a document done only after the document's result row has been
-successfully written to the shared progress CSV.
+2. Compute the number of sampling steps:
+   step_count = max(abs(x1 - x0), abs(y1 - y0)) + 1
 
+3. Sample evenly spaced x positions and y positions along the line.
 
-## Shared Result CSV
+4. Round sampled x and y positions to nearest integer matrix-window ids.
 
-Use one wide progress CSV:
-
-```text
-<output-dir>/progress_csv/document_completion_attempts.csv
-```
+5. Clip x ids to [0, prediction_window_count - 1].
 
-This CSV is an attempt log. It is not the final clean output table.
+6. Clip y ids to [0, reference_window_count - 1].
 
-It should contain one row for each flushed completed attempt. A resumed run may
-create duplicate attempts for the same document if a worker appended the row but
-crashed before marking the lease done. That is acceptable because final
-aggregation deduplicates by `pool_ordinal`.
+7. Remove duplicate ids.
 
-Required identity columns:
+8. Convert each window id into a character interval:
+   start = window_id * window_stride
+   end = min(start + window_size, text_length)
 
-```text
-pool_ordinal
-document_index
-fname
-main_language
-document_type
-worker_id
-attempt_id
-slurm_job_id
-status
-completed_at
+9. Merge overlapping intervals for the same line.
 ```
 
-`status` should be one of:
-
-```text
-processed
-skipped
-failed
-```
+One line contributes at most one count to a character, even if overlapping
+windows from that same line cover the same character. Multiple different lines
+can each contribute one count to the same character.
 
-For normal processed documents, include all fields currently needed for:
+The per-character count arrays are:
 
 ```text
-best_combination_per_document.csv
-compact_combination_metrics.csv
-loaded_documents.csv
-loadable_documents.csv
-```
+other_y:
+  length = reference_text_length
+  value at character i = how many final ref-to-pred lines geometrically cover
+  reference character i
 
-For skipped documents, include:
+other_x:
+  length = prediction_text_length
+  value at character i = how many final ref-to-pred lines geometrically cover
+  prediction character i
 
-```text
-skip_stage
-skip_reason
-row_count
-column_count
+refref_y:
+  length = reference_text_length
+  value at character i = how many final ref-to-ref lines geometrically cover
+  reference character i
 ```
 
-For plotting, include:
+The reference-axis subtraction is:
 
 ```text
-panel_path
+y_diff = other_y - refref_y
 ```
-
-if a panel was rendered.
-
-The progress CSV should also include enough fields to rebuild final outputs
-without recomputing matrices, Hough lines, text windows, or metrics.
-
-
-## Why One Attempt CSV Instead of Many Shared CSVs
 
-Do not let workers append directly to every final CSV.
+Interpretation:
 
-Bad design:
-
 ```text
-worker appends to best_combination_per_document.csv
-worker appends to loadable_documents.csv
-worker appends to loaded_documents.csv
-worker appends to skipped_documents.csv
-```
+y_diff == -1:
+  ref-to-ref covered this reference character once, but ref-to-pred did not.
+  This contributes to missing_ref_coverage.
 
-That makes partial writes hard to reason about. A worker could append to one file
-and crash before appending to another.
+y_diff == 0:
+  ref-to-pred coverage matches the ref-to-ref baseline for this reference
+  character. This contributes to correct_ref_coverage.
 
-Preferred design:
+y_diff > 0:
+  ref-to-pred covered this reference character more often than ref-to-ref did.
+  This contributes to repetition_on_reference.
 
-```text
-workers append only to document_completion_attempts.csv
-final aggregator writes the clean final CSV files
+y_diff < -1:
+  ref-to-ref covered this reference character two or more times more than
+  ref-to-pred did. tuner_simple must preserve the current invalid handling for
+  this case.
 ```
-
-This gives one concurrency point and one progress log.
-
-
-## Locked CSV Appending
-
-Multiple workers must never write the same CSV at the same time.
 
-Use one lock file:
+The `y_diff < -1` rule is important. The original v2.12 helper raises a
+`ValueError` when values outside `-1`, `0`, and `>0` appear. In `tuner_simple`,
+the current behavior is better for long automated runs because it records a
+clean invalid result instead of crashing the whole worker.
 
-```text
-<output-dir>/locks/document_completion_attempts.lock
-```
-
-A worker flushes a bucket like this:
+Preserve this current behavior:
 
 ```text
-acquire lock
-open document_completion_attempts.csv in append mode
-write header if file does not exist or is empty
-append all bucket rows
-flush file
-fsync file descriptor
-close file
-release lock
-```
-
-The lock must cover only the write. It must not cover document processing,
-Hough, scoring, or plotting.
-
-That means while one worker is appending rows, other workers can continue
-processing their current documents. They only wait briefly if they also need to
-flush at the same time.
-
-Use a real file lock, not a home-grown boolean flag. Recommended implementation:
-
-```python
-fcntl.flock(lock_handle, fcntl.LOCK_EX)
-```
-
-This is appropriate on Linux/Slurm. If a worker process dies while holding the
-lock, the operating system releases the lock when the file descriptor closes.
-
-
-## Worker Result Bucket
-
-Each worker keeps a small in-memory bucket of completed scalar rows:
-
-```python
-bucket: list[dict[str, Any]]
+if any y_diff < -1:
+    correct_ref_coverage = None
+    missing_ref_coverage = None
+    repetition_on_reference = None
+    hallucination = None
+    invalid_reason = "coverage_y_diff_below_minus_one"
+    diagnostics record exactly how many values were below -1
 ```
-
-The bucket must contain only small serializable values. It must not hold:
-
-- score matrices;
-- Hough masks;
-- plot payloads;
-- raw line arrays beyond the scalar fields already exported;
-- image objects.
 
-After each document, release large document-local data before claiming more work.
 
-Recommended flush triggers:
+## Low-Computation Design
 
-```text
---result-bucket-size <n>
---result-bucket-seconds <seconds>
-```
+Do not build full v2.12 line bundles inside `tuner_simple`.
 
-Default recommendation:
+The full bundle contains fields needed by both text scoring and coverage. The
+simple tuner only needs a small subset for coverage:
 
 ```text
---result-bucket-size 20
---result-bucket-seconds 60
+line endpoints
+reference text length
+prediction text length
+window size
+window stride
 ```
 
-Flush when either condition is true:
+The coverage code should therefore compute only:
 
 ```text
-len(bucket) >= result_bucket_size
-current_time - last_flush_time >= result_bucket_seconds
+ref-to-pred y character intervals
+ref-to-pred x character intervals
+ref-to-ref y character intervals
+other_y
+other_x
+refref_y
+y_diff
+diagnostics
+four public coverage metrics
 ```
-
-Always flush before the worker exits.
-
-Do not flush based on vague memory pressure in the first implementation. Memory
-pressure is harder to define, harder to test, and less transparent in a paper or
-methods section.
 
+This avoids:
 
-## Critical Completion Order
-
-For every completed document, the order must be:
-
 ```text
-1. claim document
-2. process document
-3. render panel if plotting is enabled
-4. add scalar result row to worker bucket
-5. when bucket flushes, append bucket rows under CSV lock
-6. after the append succeeds, mark those leases done
-7. clear bucket
-8. claim more work
+1. building large score-matrix-sized helper arrays;
+2. storing per-document JSON bundles;
+3. recomputing text-window ownership;
+4. keeping matrices alive after Hough and line filtering are finished;
+5. importing or depending on text_metrics_v2_12_parallel.
 ```
 
-The central rule is:
+The main computational cost is linear in text length plus the number of line
+intervals:
 
 ```text
-Do not mark a lease done before its row is durably appended to the progress CSV.
-```
-
-This prevents losing completed documents after a crash.
-
-
-## Bucket Lease Tracking
-
-Because a bucket can hold multiple completed documents that are not yet marked
-done, the worker must keep both the rows and the corresponding leases.
-
-Use a structure like:
-
-```python
-@dataclass
-class PendingCompletedDocument:
-    lease: DocumentLease
-    row: dict[str, Any]
-```
-
-The flush function receives:
-
-```python
-pending_completed_documents: list[PendingCompletedDocument]
+O(reference_text_length + prediction_text_length + number_of_final_lines)
 ```
 
-Flush behavior:
+The difference-array accumulation should stay because it is simple and fast:
 
 ```text
-append all rows to progress CSV
-for each pending document:
-    mark lease done
-clear pending list
+1. create an integer array of length text_length + 1;
+2. for each interval [start, end):
+       diff[start] += 1
+       diff[end] -= 1
+3. cumulative sum over diff[:-1] gives per-character counts.
 ```
 
-If appending fails, do not mark any of those leases done. Let the exception fail
-the worker. The documents remain in `claimed/`, which makes recovery explicit.
+This is much cheaper than touching every character for every line.
 
-If appending succeeds but marking one lease done fails, fail the worker. The CSV
-may contain a completed attempt for a lease still in `claimed/`. Resume logic can
-handle this by deduplicating attempts and requeueing claimed documents only when
-the user requests it.
 
+## Proposed File-Level Changes
 
-## Resume Semantics
+### 1. scoring/coverage_count_metrics.py
 
-Resume support must be explicit. Do not silently reuse old output directories.
+Keep this as the only coverage metric implementation file.
 
-Add launcher options:
+Refactor it so its public structure is visibly aligned with v2.12:
 
 ```text
---resume
---requeue-claimed
---retry-failed
+CoverageCountMetricResult
+CoverageAxisCounts
+count_text_windows()
+line_window_ids_from_endpoint()
+window_ids_to_merged_character_intervals()
+accumulate_character_counts_from_interval_groups()
+build_coverage_intervals_from_lines()
+build_ref_to_pred_axis_counts()
+build_ref_to_ref_reference_axis_counts()
+compute_reference_axis_subtraction_diagnostics()
+compute_coverage_count_metrics()
 ```
 
-Default behavior without `--resume`:
+The function names should make the data flow obvious:
 
 ```text
-refuse to run if document_pool/ already exists
-refuse to run if progress_csv/document_completion_attempts.csv already exists
+line geometry -> window ids -> character intervals -> character counts -> y_diff -> metrics
 ```
 
-Behavior with `--resume` only:
-
-```text
-reuse the existing pool and progress CSV
-keep done documents done
-keep available documents available
-refuse to continue if claimed/ is non-empty
-refuse to continue if failed/ is non-empty
-```
+`compute_coverage_count_metrics()` should remain the public entry point used by
+`scoring_pipeline.py`.
 
-Reason: a non-empty `claimed/` directory may mean old workers are still running.
-The user must explicitly say how to treat those documents.
+It must ignore `column_assignment` for coverage. Column assignment belongs to
+line-text Levenshtein scoring, not coverage counting.
 
-Behavior with:
 
-```text
---resume --requeue-claimed
-```
+### 2. scoring/scoring_pipeline.py
 
-Move all documents from `claimed/` back to `available/` before submitting new
-workers. This means the user confirms that old workers are dead or should be
-ignored.
+Clean up the naming around `DirectionScoringPayload`.
 
-Behavior with:
+Recommended change:
 
 ```text
---resume --retry-failed
+DirectionScoringPayload
+  hough_payload
+  metric_payload
 ```
 
-Move all documents from `failed/` back to `available/` before submitting new
-workers.
+or keep `scoring_payload` but update comments so they clearly say:
 
-Behavior with:
-
 ```text
---resume --requeue-claimed --retry-failed
+The payload contains final lines, assignment arrays, text lengths, and window
+settings. Coverage metrics use only final line geometry and text/window sizes.
+Line-text metrics use the assignment arrays.
 ```
-
-Resume all incomplete or failed documents while keeping `done/` untouched.
-
-
-## Duplicate Attempts During Resume
 
-A duplicate attempt can happen in this failure window:
+Remove `refref_y` from `DirectionScoringPayload` if no other code uses it. It is
+currently misleading because the real coverage code computes `refref_y` inside
+`compute_coverage_count_metrics()` from final ref-to-ref line geometry.
 
-```text
-worker appends row to CSV
-worker crashes before marking lease done
-resume requeues claimed document
-document is processed again
-new row is appended
-```
+If removing it creates too much churn, leave it temporarily but mark it for
+deletion in the same phase. The better final code should not carry unused
+coverage arrays in the main scoring payload.
 
-Therefore `document_completion_attempts.csv` must be treated as an attempt log,
-not the final truth.
 
-Final aggregation deduplicates by:
+### 3. scoring/line_text_similarity.py
 
-```text
-pool_ordinal
-```
+Do not change the metric formulas here unless tests reveal a direct dependency
+on renamed payload fields.
 
-Recommended rule:
+This file should remain responsible for:
 
 ```text
-for each pool_ordinal, keep the latest processed/skipped attempt that is compatible with pool done state
+weighted_along_lines_normalised_levenshtein
+min_surviving_line_nls filtering
+line text extraction from assignment arrays
 ```
-
-If there are multiple successful attempts for the same `pool_ordinal`, record the
-duplicate count in `aggregation_manifest.json`.
 
-If a duplicate row has a different `document_index` or `fname` for the same
-`pool_ordinal`, aggregation must fail because that means pool state and progress
-CSV do not describe the same selected run.
+This is separate from geometric coverage.
 
 
-## Final Aggregation
+### 4. serial_runner/document_runner.py
 
-Final aggregation should run after all workers finish successfully.
+Do not change the output metric names.
 
-The aggregator reads:
-
-```text
-<output-dir>/document_pool/document_pool_manifest.json
-<output-dir>/document_pool/done/*.json
-<output-dir>/document_pool/failed/*.json
-<output-dir>/document_pool/claimed/*.json
-<output-dir>/document_pool/available/*.json
-<output-dir>/progress_csv/document_completion_attempts.csv
-```
+Only update wording in logs if necessary so logs do not call character-level
+coverage "window coverage".
 
-The aggregator writes:
+The result row should still include:
 
 ```text
-best_combination_per_document.csv
-compact_combination_metrics.csv
-loadable_documents.csv
-loaded_documents.csv
-runfile_documents.csv
-skipped_documents.csv
-document_type_summary.csv
-run_summary.json
-aggregation_manifest.json
+coverage_invalid_reason
+coverage_invalid_error_message
+coverage_y_diff_size
+coverage_y_diff_min
+coverage_y_diff_max
+coverage_y_diff_le_minus_one_count
+coverage_y_diff_lt_minus_one_count
+coverage_y_diff_below_minus_one_counts_json
 ```
-
-The final CSV files should match the current direct-run output format as closely
-as possible.
-
-Aggregation must fail if:
 
-- `available/` is not empty;
-- `claimed/` is not empty;
-- `failed/` is not empty, unless a future partial aggregation flag is passed;
-- a document is marked done but has no successful attempt row;
-- an attempt row refers to a `pool_ordinal` not in the pool manifest;
-- duplicate attempts disagree on document identity.
+These diagnostics are necessary to preserve the current `-2 or lower` handling.
 
-Aggregation should write counts to `aggregation_manifest.json`:
 
-```text
-selected_document_count
-done_count
-available_count
-claimed_count
-failed_count
-attempt_row_count
-unique_completed_document_count
-duplicate_attempt_count
-processed_document_count
-skipped_document_count
-stitched_plot_paths
-```
+### 5. results_writing/
 
+Do not add new scientific columns.
 
-## Plotting in Atomic Mode
+The current final CSV should continue to expose only the approved public metrics
+plus diagnostics needed for invalid coverage cases.
 
-Workers should render individual document panels only.
+If any current output column says or implies window-level coverage, rename only
+if the rename does not break existing downstream plots. Otherwise leave the
+column name but document internally that values are character-level ratios.
 
-Worker panel path:
-
-```text
-<output-dir>/plots/document_panels/<safe-language>/document_<pool_ordinal>_<safe-fname>.png
-```
 
-Workers do not stitch language images.
+### 6. plotting/
 
-Final aggregation stitches panels by language using the `panel_path` values in
-the progress CSV.
+No mandatory plotting changes are needed.
 
-If plotting is disabled:
+If a plot displays metric descriptions, make sure descriptions say:
 
 ```text
---plot-mode none
+correct_ref_coverage is a reference-character ratio
+missing_ref_coverage is a reference-character ratio
+repetition_on_reference is a reference-character ratio
+hallucination is a prediction-character ratio
 ```
-
-workers should not import plotting modules, should not render panels, and the
-progress CSV should leave `panel_path` empty.
-
-If plotting is enabled and panel rendering fails, the worker should fail the
-lease. A plotting failure should not be silently hidden in a scientific audit
-run.
 
-Region of Interest plotting must remain disabled.
+Do not add coverage-array plots in this phase. The goal is metric correctness
+with minimal computation and minimal output growth.
 
-
-## Worker Launcher
-
-Add:
-
-```text
-tuner_simple/run_tunner_atomic.sh
-```
 
-This is a Bash launcher, not an sbatch script.
+## Test Plan
 
-It should accept all current `run_tunner.sh` scientific options plus:
+### Unit Tests For Character Interval Construction
 
-```text
---worker-count <n>
---account <name>
---partition <name>
---time <HH:MM:SS>
---cpus-per-task <n>
---mem <amount>
---result-bucket-size <n>
---result-bucket-seconds <seconds>
---resume
---requeue-claimed
---retry-failed
---skip-aggregation
-```
+Add tests that prove window ids become character intervals correctly.
 
-Recommended defaults:
+Example:
 
 ```text
-worker_count = 20
-account = project_2017385
-partition = medium
-time = 24:00:00
-cpus_per_task = 4
-mem = 48G
-result_bucket_size = 20
-result_bucket_seconds = 60
-aggregation enabled by default
-```
-
-The launcher should:
-
-1. Validate inputs.
-2. Create or resume the document pool.
-3. Write `atomic_run_manifest.json`.
-4. Write exact submitted commands to `launch_commands.sh`.
-5. Submit `worker_count` Slurm workers.
-6. Submit final aggregation with `afterok` dependency unless `--skip-aggregation`
-   is passed.
-
-Worker submission should use `--parsable` so job IDs can be collected for the
-aggregation dependency.
+window_size = 10
+window_stride = 5
+text_length = 25
+window ids = [0, 1, 2]
 
+raw intervals:
+  [0, 10)
+  [5, 15)
+  [10, 20)
 
-## Worker sbatch Script
-
-Add:
-
-```text
-tuner_simple/run_tunner_atomic_worker.sbatch
+merged interval:
+  [0, 20)
 ```
-
-This script should:
-
-1. Load the same runtime environment as `run_tunner.sh`.
-2. Resolve the real `tuner_simple` directory with an absolute fallback.
-3. Export low thread counts:
-
-   ```text
-   OMP_NUM_THREADS=1
-   OPENBLAS_NUM_THREADS=1
-   MKL_NUM_THREADS=1
-   NUMEXPR_NUM_THREADS=1
-   PYTHONUNBUFFERED=1
-   ```
-
-4. Run:
 
-   ```text
-   python3 tuner_simple/run_tuner_simple.py <forwarded args>
-   ```
+This protects the overlapping-window behavior.
 
-The document-claim loop must live in Python, not Bash, so the worker can build
-runfile data and pickle indexes once and reuse them across claimed documents.
 
+### Unit Tests For One-Line Correct Coverage
 
-## Python Configuration Additions
+Create matching ref-to-ref and ref-to-pred diagonal lines.
 
-Add optional fields to `PipelineConfig`:
+Expected:
 
-```python
-dynamic_document_pool_dir: Path | None = None
-dynamic_worker_id: str | None = None
-atomic_output_dir: Path | None = None
-result_bucket_size: int = 20
-result_bucket_seconds: float = 60.0
-```
-
-Add CLI options:
-
 ```text
---dynamic-document-pool-dir <path>
---dynamic-worker-id <value>
---atomic-output-dir <path>
---result-bucket-size <n>
---result-bucket-seconds <seconds>
-```
-
-Validation rules:
-
-1. `dynamic_document_pool_dir`, `dynamic_worker_id`, and `atomic_output_dir` must
-   be provided together.
-2. `result_bucket_size` must be positive.
-3. `result_bucket_seconds` must be positive.
-4. Direct serial mode must still work without any dynamic options.
-
-`run_tuner_simple.py` should route like this:
-
-```python
-if config.dynamic_document_pool_dir is None:
-    run_simple_tuner(config, log=log)
-else:
-    run_atomic_document_worker(config, log=log)
+correct_ref_coverage = 1.0
+missing_ref_coverage = 0.0
+repetition_on_reference = 0.0
+hallucination = 0.0
+invalid_reason = None
 ```
-
-
-## Dynamic Worker Control Flow
-
-The worker should:
-
-1. Load the runfile once.
-2. Apply the same selection filters once.
-3. Build `document_by_index` once.
-4. Build ref-to-pred and ref-to-ref pickle indexes once.
-5. Open a `DocumentLeasePool` once.
-6. Start an empty pending-completion bucket.
-7. Claim one document.
-8. Process that document with the existing `process_one_document` function.
-9. Render a panel if plotting is enabled.
-10. Convert the result into one progress CSV row.
-11. Add the row and lease to the pending bucket.
-12. Flush the bucket when size or time threshold is reached.
-13. Claim the next document.
-14. Flush remaining bucket rows before exiting.
-15. Exit cleanly when the pool is empty.
-
-A worker must never claim a second document while one document is actively being
-processed. It may have multiple completed leases waiting in the pending bucket,
-but those documents are already processed and waiting only for batched CSV
-flush.
-
 
-## Failure Handling
 
-If processing a document returns a normal `skipped_row`, write a skipped attempt
-row and eventually mark the lease done. That is not an infrastructure failure;
-it is a handled document outcome.
+### Unit Tests For Missing Reference Coverage
 
-If processing raises an unexpected exception after a lease is claimed:
-
-```text
-flush any previous pending completed rows first if possible
-mark the active lease failed
-re-raise the exception
-```
-
-If bucket flushing fails:
-
-```text
-do not mark bucket leases done
-raise exception
-worker job fails
-leases remain claimed
-```
+Use a ref-to-ref line and no ref-to-pred line.
 
-If a worker exits normally:
+Expected:
 
 ```text
-pending bucket must be empty
-active lease must be None
+y_diff = -1 for covered reference characters
+missing_ref_coverage = 1.0 when the baseline covers the full reference
+hallucination = 1.0 when no prediction character is covered
 ```
 
-If not, raise an error so the worker job fails visibly.
 
+### Unit Tests For Repetition On Reference
 
-## Resume Flow
+Use one ref-to-ref line and two ref-to-pred lines covering the same reference
+characters.
 
-A resume run should be explicit and conservative.
+Expected:
 
-Fresh run:
-
-```text
-run_tunner_atomic.sh --output-dir NEW_DIR ...
-```
-
-Resume without requeue:
-
 ```text
-run_tunner_atomic.sh --output-dir EXISTING_DIR --resume ...
+y_diff > 0 for repeated reference characters
+repetition_on_reference = fraction of repeated reference characters
 ```
 
-This is allowed only if:
-
-```text
-claimed/ is empty
-failed/ is empty
-```
+The test must confirm that repetition is counted per character, not by the
+magnitude of the positive difference.
 
-Resume and requeue claimed documents:
 
-```text
-run_tunner_atomic.sh --output-dir EXISTING_DIR --resume --requeue-claimed ...
-```
+### Unit Tests For y_diff Below Minus One
 
-This moves claimed documents back to available. It should log every moved
-filename.
+Use two ref-to-ref lines and no ref-to-pred line.
 
-Resume and retry failed documents:
+Expected:
 
 ```text
-run_tunner_atomic.sh --output-dir EXISTING_DIR --resume --retry-failed ...
+y_diff = -2 on covered reference characters
+correct_ref_coverage = None
+missing_ref_coverage = None
+repetition_on_reference = None
+hallucination = None
+invalid_reason = "coverage_y_diff_below_minus_one"
+coverage_y_diff_lt_minus_one_count > 0
+coverage_y_diff_below_minus_one_counts_json includes "-2"
 ```
 
-This moves failed documents back to available. It should log every moved
-filename.
+This test preserves the current tuner_simple behavior.
 
-Resume with both:
 
-```text
-run_tunner_atomic.sh --output-dir EXISTING_DIR --resume --requeue-claimed --retry-failed ...
-```
+### Unit Tests Separating Ownership From Coverage
 
-This keeps done documents untouched and reruns only incomplete or failed work.
+Add a test where `column_assignment` is deliberately empty or misleading, but
+`lines_used` contains a valid line.
 
-The launcher must validate that the current command parameters match the old
-`atomic_run_manifest.json`. It should refuse to resume if scientific parameters
-changed, unless a future explicit override is added.
+Coverage metrics should still be computed from the line geometry.
 
-Scientific parameters that must match include:
+This test directly protects the conceptual distinction:
 
 ```text
-runfile_json
-scores_pkl_ref_to_pred
-scores_pkl_ref_to_ref
-window_size
-window_stride
-minimum_matrix_rows
-minimum_matrix_columns
-score_floor_alpha
-hough_threshold
-hough_line_length
-hough_line_gap
-hough_seed
-align_min_iou_threshold
-min_surviving_line_nls
-plot_mode
-saved_figure_dpi
+column assignment is not coverage
+line geometry is coverage
 ```
 
 
-## Pool Status Helper
+### Integration Smoke Test
 
-Add:
+Run a tiny `tuner_simple` command with:
 
 ```text
-tuner_simple/dynamic_pool/pool_status.py
+one or two documents
+fixed Hough parameters
+plotting disabled
+one direct serial run
+one atomic worker run
 ```
 
-It should print:
+Check:
 
 ```text
-selected_document_count
-available_count
-claimed_count
-done_count
-failed_count
-attempt_row_count
-unique_attempted_document_count
+1. both modes produce the same metric values;
+2. invalid y_diff cases are written as rows, not worker crashes;
+3. document-level Levenshtein remains unchanged;
+4. weighted along-lines Levenshtein remains unchanged;
+5. final CSV column names remain stable.
 ```
-
-It should not modify state.
-
-This helps during long runs and before resume.
 
 
 ## Implementation Phases
 
-### Phase 1: Document pool
+### Phase 1: Snapshot And Baseline
 
-Implement `tuner_simple/dynamic_pool/document_pool.py`.
+Create a snapshot of the current `tuner_simple/` directory before touching code.
 
-Required behavior:
-
-```text
-initialize pool
-claim next available document atomically
-mark lease done
-mark lease failed
-write events.jsonl
-```
-
-Tests:
+Run:
 
 ```text
-one worker claims one document
-second worker cannot claim same document
-empty pool returns None
-mark done moves claimed to done
-mark failed moves claimed to failed
+python3 -m pytest /scratch/project_2017385/dorian/Churro_copy/tuner_simple/tests
+python3 -m py_compile on all tuner_simple Python files
 ```
 
+Record the current test state before refactoring.
 
-### Phase 2: Pool initializer
 
-Implement `tuner_simple/dynamic_pool/initialize_document_pool.py`.
+### Phase 2: Refactor coverage_count_metrics.py Names Only
 
-It must use current `tuner_simple` runfile loading and filtering.
+Rename internal helpers so the code reads like the v2.12 flow.
 
-Tests:
+No formula changes in this phase.
+
+Expected result:
 
 ```text
-language filter respected
-document type filter respected
-target filename filter respected
-max-items respected
-existing pool rejected
+same tests pass
+same output values
+clearer function names
+no imports from text_metrics_v2_12_parallel
 ```
 
 
-### Phase 3: Locked CSV bucket writer
+### Phase 3: Remove Or Isolate Misleading Payload State
 
-Implement `tuner_simple/results_writing/locked_csv_bucket.py`.
+Update `scoring_pipeline.py` so `DirectionScoringPayload` no longer implies that
+coverage is assignment-based.
 
-Required functions:
-
-```python
-append_rows_with_file_lock(...)
-flush_completed_document_bucket(...)
-```
-
-Tests:
+Preferred change:
 
 ```text
-header written once
-rows append correctly
-lock file is used
-two simulated writers do not corrupt CSV
-fsync is called before success is returned
+remove unused refref_y
+update comments around scoring_payload / metric_payload
 ```
 
+Do not change line-text similarity behavior.
 
-### Phase 4: Progress row builder
 
-Add code that converts `DocumentRunResult` into one wide progress CSV row.
+### Phase 4: Add Coverage-Specific Tests
 
-The row must include identity, status, result fields, skip fields, timing fields,
-worker id, attempt id, Slurm job id, and optional panel path.
+Add the tests listed above before making any formula-sensitive edits.
 
-Tests:
+These tests should use tiny synthetic line dictionaries so they are fast and
+explainable.
+
+The tests should not need score matrices, Hough, Slurm, plotting, or pickle
+files.
+
+
+### Phase 5: Verify v2.12 Metric Equivalence
+
+Confirm that the local implementation matches the v2.12 formula:
 
 ```text
-processed document row has metric fields
-skipped document row has skip fields
-row contains pool ordinal and worker id
-row contains hough parameters and score-floor values
+ref-to-pred line geometry -> other_y and other_x
+ref-to-ref line geometry  -> refref_y
+y_diff = other_y - refref_y
+metrics from y_diff and other_x
 ```
 
+This phase should compare against hand-calculated expected arrays, not by
+importing v2.12 modules.
 
-### Phase 5: Worker panel writer
+The production package must remain self-contained.
 
-Implement `tuner_simple/plotting/atomic_panel_writer.py`.
 
-It should render one panel to a deterministic path and return that path.
+### Phase 6: Preserve Invalid y_diff Handling
 
-Tests:
+Keep the current `tuner_simple` rule:
 
 ```text
-path contains pool ordinal
-path contains safe language
-plot disabled does not import plotting helper
+y_diff < -1 means invalid coverage result, not a crashed process
 ```
 
-
-### Phase 6: Dynamic worker runner
-
-Implement `tuner_simple/serial_runner/dynamic_worker_runner.py`.
-
-It must claim one document at a time, process it, bucket the row, flush by size
-or time, and mark leases done only after successful CSV append.
-
-Tests:
+Ensure all result rows still include:
 
 ```text
-worker processes all documents from small pool
-worker exits cleanly when pool empty
-bucket flushes at size threshold
-bucket flushes at exit
-lease not marked done if append fails
+invalid_reason
+invalid_error_message
+diagnostic counts
 ```
 
+This is where `tuner_simple` intentionally differs from the original v2.12
+helper, which raises an exception for undefined categories.
 
-### Phase 7: CLI and entry routing
 
-Add dynamic options to config parsing and route `run_tuner_simple.py` to either
-direct serial mode or dynamic worker mode.
+### Phase 7: Direct And Atomic Smoke Tests
 
-Tests:
+Run a tiny direct serial smoke test and a tiny atomic-worker smoke test.
+
+Check:
 
 ```text
-direct serial CLI unchanged
-dynamic CLI validates required fields
-invalid bucket size rejected
-invalid bucket seconds rejected
+1. no Region of Interest calculation is reintroduced;
+2. no Hough grid is introduced;
+3. score-floor Hough input still works as before;
+4. coverage metrics are character-level;
+5. direct and atomic output rows agree for the same documents;
+6. invalid coverage rows are visible in CSV output.
 ```
 
 
-### Phase 8: Aggregator
+### Phase 8: Documentation Cleanup
 
-Implement final aggregation from `document_completion_attempts.csv` and pool
-state.
+Update `tuner_simple/README.md` only after tests pass.
 
-Tests:
+The documentation should say:
 
 ```text
-deduplicates duplicate attempts by pool ordinal
-fails on identity conflict
-fails when done document has no attempt row
-writes final direct-compatible CSVs
-writes run_summary.json
-stitches language plots when panel paths exist
+Coverage metrics are computed from final line geometry.
+Reference coverage compares ref-to-pred against a ref-to-ref baseline.
+Hallucination is the fraction of prediction characters not crossed by final
+ref-to-pred line geometry.
+y_diff < -1 is preserved as an invalid coverage diagnostic in tuner_simple.
 ```
 
+Avoid saying the metrics are window ratios.
 
-### Phase 9: Launcher and worker sbatch scripts
 
-Implement:
+## Critical Review Of The Design
+
+This design is intentionally conservative.
+
+What it does well:
 
 ```text
-run_tunner_atomic.sh
-run_tunner_atomic_worker.sbatch
+1. It restores the scientific meaning from text_metrics_v2_12_parallel.
+2. It keeps tuner_simple self-contained.
+3. It avoids rebuilding full v2.12 bundles.
+4. It keeps the current invalid -2 handling.
+5. It keeps computation low.
+6. It keeps output metric names stable.
 ```
 
-Tests:
+Potential weak points:
 
 ```text
-bash -n run_tunner_atomic.sh
-bash -n run_tunner_atomic_worker.sbatch
-launcher writes atomic_run_manifest.json
-launcher writes launch_commands.sh
-launcher submits requested worker count in test-only mode
+1. If ref-to-ref lines repeat strongly, y_diff < -1 can still invalidate the
+   coverage metrics. This is intentional for now, but it means some documents
+   will have None for coverage fields.
+
+2. Coverage is line-geometry based, so a geometrically long but text-poor line
+   can cover many characters. The line-level Levenshtein filter helps, but the
+   coverage metric itself does not inspect text quality.
+
+3. Ref-to-pred uses final lines after the tuner_simple line-level Levenshtein
+   filter. Original v2.12 did not have exactly the same simple-tuner text filter,
+   so the formula can be v2.12-compatible while the selected final line set is
+   tuner_simple-specific.
+
+4. Character-level arrays can still be long for very large documents. The
+   difference-array method is the lightest simple implementation, but the memory
+   cost is still proportional to text length.
 ```
 
+These are acceptable tradeoffs for this pipeline because the goal is a simple,
+fixed-parameter scientific tool rather than a full reproduction of the old
+parallel report system.
 
-### Phase 10: Resume tests
 
-Test resume behavior without Slurm first, then with small Slurm jobs.
+## Definition Of Done
 
-Tests:
+The metric correction is complete when:
 
 ```text
-fresh run refuses existing pool
-resume refuses claimed documents by default
-resume --requeue-claimed moves claimed to available
-resume --retry-failed moves failed to available
-resume refuses changed scientific parameters
-aggregation handles duplicate attempt rows
+1. coverage_count_metrics.py computes coverage from final line geometry;
+2. column_assignment is not used for coverage counts;
+3. ref-to-pred creates other_y and other_x;
+4. ref-to-ref creates refref_y;
+5. y_diff = other_y - refref_y;
+6. y_diff == -1 gives missing_ref_coverage;
+7. y_diff == 0 gives correct_ref_coverage;
+8. y_diff > 0 gives repetition_on_reference;
+9. other_x == 0 gives hallucination;
+10. y_diff < -1 returns invalid metrics with diagnostics, not a crash;
+11. tests cover correct, missing, repetition, hallucination, and invalid cases;
+12. direct serial and atomic worker modes still run;
+13. public CSV metric names remain unchanged;
+14. no code imports from text_metrics_v2_12_parallel;
+15. no Region of Interest logic is reintroduced;
+16. no Hough grid or multiprocessing is introduced.
 ```
 
+## 2026-06-09 Implementation Update: v2.12 Coverage And Cython Ownership
 
-### Phase 11: End-to-end smoke
+The current `tuner_simple` implementation now keeps the v2.12-style coverage-count behavior inside the local pipeline instead of importing it from another tuner. The coverage metrics are calculated from final ref-to-pred and ref-to-ref line geometry, converted back to character spans through `window_size` and `window_stride`. A `y_diff < -1` situation is still treated as invalid coverage evidence, but the document result and final recognized lines are preserved so plotting and audit output can still show what the Hough stage found.
 
-Run a tiny atomic job with two workers and several target documents.
+The Hough column-ownership hot loop now has a local optional Cython accelerator in `cython_accel/`. The accelerated function assigns each matrix column to the strongest final candidate line that crosses an active Hough voter cell. If the compiled extension is available, the Hough filtering code uses it. If it is not available, the code falls back to the readable Python implementation with the same output contract.
 
-Required checks:
+Both `run_tunner.sh` and `run_tunner_atomic.sh` attempt to build the Cython accelerator before starting the pipeline. This keeps the normal user command simple while still allowing safe fallback to Python when Cython is unavailable. Set `TUNER_SIMPLE_SKIP_CYTHON_BUILD=1` only when the caller deliberately wants to skip the build step.
 
-```text
-done count equals selected document count
-available count is zero
-claimed count is zero
-failed count is zero
-progress CSV exists
-final CSVs exist
-stitched language plots exist when plotting enabled
-metrics match direct serial run for the same target documents
-```
+Validation after implementation:
 
-
-## Future Command Shape
-
-After implementation, a full run should look like:
-
-```bash
-bash /scratch/project_2017385/dorian/Churro_copy/tuner_simple/run_tunner_atomic.sh \
-  --runfile-json /scratch/project_2017385/dorian/Churro_copy/results/custom_churro_infer_dev_run1/vllm/dev/outputs.json \
-  --output-dir /scratch/project_2017385/dorian/Churro_copy/results/tuner_simple_atomic_all_1170 \
-  --scores-pkl-ref-to-pred /scratch/project_2017385/dorian/Churro_copy/results/compares_churro_dev/ref_to_pred/old_scores_reference_prediction_ws50_st35_levenshtein.pkl \
-  --scores-pkl-ref-to-ref /scratch/project_2017385/dorian/Churro_copy/results/compares_churro_dev/ref_to_ref/old_scores_reference_self_ws50_st35_levenshtein.pkl \
-  --all-languages \
-  --all-document-types \
-  --max-items 1170 \
-  --window-size 50 \
-  --window-stride 35 \
-  --minimum-matrix-rows 10 \
-  --minimum-matrix-columns 10 \
-  --score-floor-alpha 1.8 \
-  --hough-threshold 5 \
-  --hough-line-length 5 \
-  --hough-line-gap 4 \
-  --hough-seed 1 \
-  --align-min-iou-threshold 0.045 \
-  --min-surviving-line-nls 0.65 \
-  --plot-mode stitched-language \
-  --stitched-panel-columns 6 \
-  --saved-figure-dpi 100 \
-  --worker-count 20 \
-  --result-bucket-size 20 \
-  --result-bucket-seconds 60 \
-  --account project_2017385 \
-  --partition medium \
-  --time 24:00:00 \
-  --cpus-per-task 4 \
-  --mem 48G
-```
-
-Resume example:
-
-```bash
-bash /scratch/project_2017385/dorian/Churro_copy/tuner_simple/run_tunner_atomic.sh \
-  --output-dir /scratch/project_2017385/dorian/Churro_copy/results/tuner_simple_atomic_all_1170 \
-  --resume \
-  --requeue-claimed \
-  --retry-failed \
-  --worker-count 20 \
-  --account project_2017385
-```
-
-The resume command should still require or recover the original scientific
-parameters from `atomic_run_manifest.json`. The implementation should choose one
-clear rule and document it in `--help`.
-
-
-## Definition of Done
-
-The refactor is complete when:
-
-1. Direct `run_tunner.sh` still works unchanged.
-2. Atomic launcher uses workers, not shards, in user-facing text.
-3. Atomic launcher creates or resumes a document pool safely.
-4. Workers claim one document at a time.
-5. Workers keep only small scalar result rows in the bucket.
-6. Workers flush the bucket by size, by time, and at exit.
-7. CSV appends are protected by a file lock.
-8. Leases are marked done only after successful CSV append.
-9. Resume mode can continue from available documents.
-10. Resume mode can explicitly requeue claimed documents.
-11. Resume mode can explicitly retry failed documents.
-12. Aggregation deduplicates duplicate attempts safely.
-13. Final CSVs match the current direct-run output format as closely as possible.
-14. Final stitched plots are created from worker-rendered panels.
-15. No Region of Interest calculation or plotting is reintroduced.
-16. No Hough grid is introduced.
-17. No Python multiprocessing or thread pool is introduced.
-18. Tests cover scheduling, locked appends, bucket flushing, resume, aggregation,
-    and direct-mode compatibility.
-
-## Implementation Status: Dynamic Worker Pool Added on 2026-06-09
-
-### Snapshot Created Before Changes
-
-- A full snapshot of the pre-refactor `tuner_simple/` directory was created at:
-  `/scratch/project_2017385/dorian/Churro_copy/tuner_simple_snapshot_before_atomic_workers_20260609_105055/`
-
-### Implemented Files
-
-- `dynamic_pool/document_pool.py`
-  - Owns the dynamic document pool state directories: `available/`, `claimed/`, `done/`, and `failed/`.
-  - Claims documents by atomically renaming one JSON file from `available/` into `claimed/`.
-  - Marks documents done only after the worker has successfully appended that document's progress row to the shared CSV.
-  - Supports requeueing stale claimed documents and failed documents for resumed runs.
-
-- `dynamic_pool/initialize_document_pool.py`
-  - Creates the initial document pool from `outputs.json` using the same runfile selection logic as the serial runner.
-  - Supports `--resume`, `--requeue-claimed`, and `--retry-failed`.
-  - Refuses to create a fresh pool over an existing pool so old state cannot be mixed into a new run by accident.
-
-- `dynamic_pool/pool_status.py`
-  - Prints the current number of documents in each pool state directory.
-
-- `results_writing/locked_csv_bucket.py`
-  - Appends worker progress rows to one shared CSV under a filesystem lock.
-  - Writes the CSV header only once.
-  - Flushes and synchronizes the CSV file before the worker moves completed leases to `done/`.
-
-- `results_writing/progress_rows.py`
-  - Converts one `DocumentRunResult` into one wide progress CSV row.
-  - Stores worker metadata, pool ordinal, Slurm job identifier, panel path, and the final metric/skipped/loadable row fields needed for aggregation.
-  - Converts progress rows back into the existing final CSV row groups during aggregation.
-
-- `plotting/atomic_panel_writer.py`
-  - Writes one 2x3 document panel per completed document when plotting is enabled.
-  - Uses the same document panel renderer as the serial runner.
-  - Leaves stitched language images for the final aggregation stage.
-
-- `serial_runner/dynamic_worker_runner.py`
-  - Runs one worker process.
-  - Builds score matrix indexes once per worker.
-  - Repeatedly claims the next available document, processes it, optionally writes its panel, appends a progress row, and marks it done.
-  - Flushes result rows by bucket size and by elapsed time.
-  - Releases each document result from memory after it has been persisted.
-
-- `results_writing/dynamic_result_aggregation.py`
-  - Reads the shared progress CSV after workers finish.
-  - Keeps the latest row for each document if a resumed run produced multiple attempts.
-  - Reconstructs the same final flat CSV files used by the serial runner.
-  - Creates stitched language images from the per-document panel files after all workers are done.
-
-- `aggregate_dynamic_outputs.py`
-  - Command-line entry point for final aggregation after dynamic workers finish.
-
-- `run_tunner_atomic_worker.sbatch`
-  - Slurm worker script that runs one dynamic worker.
-
-- `run_tunner_atomic_aggregate.sbatch`
-  - Slurm aggregation script that builds final CSV files and stitched images after worker jobs finish.
-
-- `run_tunner_atomic.sh`
-  - Bash launcher that initializes or resumes the pool, submits the requested number of worker jobs, and submits the final aggregation job with an `afterok` dependency on the worker jobs.
-
-### Execution Flow Now Implemented
-
-1. The launcher creates a dynamic document pool under:
-   `<output-dir>/dynamic_document_pool/`
-
-2. Each selected document gets one small scheduling JSON file under:
-   `<output-dir>/dynamic_document_pool/available/`
-
-3. Each worker repeatedly claims one available JSON file by moving it into:
-   `<output-dir>/dynamic_document_pool/claimed/`
-
-4. The worker processes the claimed document through the same document-level code path used by the serial runner.
-
-5. If plotting is enabled, the worker writes one document panel under:
-   `<output-dir>/plots/document_panels/<language>/`
-
-6. The worker appends completed document rows to:
-   `<output-dir>/progress_csv/document_completion_attempts.csv`
-
-7. The append is protected by:
-   `<output-dir>/locks/document_completion_attempts.lock`
-
-8. Only after the append succeeds, the worker moves the document lease into:
-   `<output-dir>/dynamic_document_pool/done/`
-
-9. If a run is interrupted, documents still in `available/` remain unclaimed, and stale documents in `claimed/` can be returned to `available/` with `--resume --requeue-claimed`.
-
-10. After all worker jobs finish successfully, the aggregation job reads the progress CSV, writes the final flat CSV files, and creates stitched language plots.
-
-### Validation Completed
-
-- Shell syntax validation passed for:
-  - `run_tunner_atomic.sh`
-  - `run_tunner_atomic_worker.sbatch`
-  - `run_tunner_atomic_aggregate.sbatch`
-
-- Python compilation validation passed for all newly added and edited modules.
-
-- A scratch smoke test was run at:
-  `/scratch/project_2017385/dorian/Churro_copy/results/tuner_simple_atomic_smoke_20260609_1100/`
-
-- The smoke test used two toy documents, dynamic claiming, bucket size `1`, plotting disabled, and final aggregation.
-
-- Smoke test result:
-  - `available: 0`
-  - `claimed: 0`
-  - `done: 2`
-  - `failed: 0`
-  - final flat CSV files were produced by the aggregation step.
+- `bash -n run_tunner.sh` passed.
+- `bash -n run_tunner_atomic.sh` passed.
+- `bash -n run_tunner_atomic_worker.sbatch` passed.
+- `python3 -m compileall -q tuner_simple` passed.
+- `python3 -m pytest --confcutdir=tuner_simple tuner_simple/tests -q` passed with 11 tests.
+- A one-document Finnish smoke run completed successfully with the requested Hough and score-floor settings.
+- A synthetic ownership-loop comparison showed identical Python and Cython assignments, identical owned-column counts, and about 42x faster runtime for the Cython ownership loop on the synthetic matrix.

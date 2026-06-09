@@ -57,12 +57,12 @@ DEFAULT_RUNFILE_JSON="/scratch/project_2017385/dorian/Churro_copy/results/custom
 worker_count="1"
 account="project_2017385"
 partition="medium"
-time_limit="04:00:00"
+time_limit="01:30:00"
 cpus_per_task="4"
-memory_request="32G"
-aggregate_partition="small"
-aggregate_time_limit="04:00:00"
-aggregate_memory_request="32G"
+memory_request="24G"
+aggregate_partition="medium"
+aggregate_time_limit="01:30:00"
+aggregate_memory_request="24G"
 slurm_log_dir=""
 resume_pool="false"
 requeue_claimed="false"
@@ -77,6 +77,23 @@ stitched_panel_columns="${STITCHED_PANEL_COLUMNS:-3}"
 python_arguments=()
 pool_selection_arguments=()
 
+
+build_cython_accelerators() {
+  if [[ "${TUNER_SIMPLE_SKIP_CYTHON_BUILD:-0}" == "1" ]]; then
+    echo "[cython] skipped because TUNER_SIMPLE_SKIP_CYTHON_BUILD=1"
+    return 0
+  fi
+  if [[ ! -f "${SCRIPT_DIR}/cython_accel/build.py" ]]; then
+    echo "[cython] skipped because ${SCRIPT_DIR}/cython_accel/build.py was not found"
+    return 0
+  fi
+  echo "[cython] building tuner_simple accelerators in ${SCRIPT_DIR}"
+  if (cd "${SCRIPT_DIR}" && python3 cython_accel/build.py build_ext --inplace >/dev/null); then
+    echo "[cython] tuner_simple accelerators are ready"
+  else
+    echo "[cython] WARNING: accelerator build failed; workers will use the Python fallback" >&2
+  fi
+}
 while [[ $# -gt 0 ]]; do
   current_argument="$1"
   case "${current_argument}" in
@@ -219,6 +236,8 @@ if [[ -z "${slurm_log_dir}" ]]; then
 fi
 mkdir -p "${slurm_log_dir}"
 
+
+build_cython_accelerators
 pool_initialize_arguments=(
   --runfile-json "${runfile_json}"
   --pool-dir "${pool_dir}"

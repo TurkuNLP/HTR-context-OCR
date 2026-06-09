@@ -2,11 +2,11 @@
 #SBATCH --job-name=tuner_simple_worker
 #SBATCH --account=project_2017385
 #SBATCH --partition=medium
-#SBATCH --time=24:00:00
+#SBATCH --time=01:30:00
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=4
-#SBATCH --mem=48G
+#SBATCH --mem=24G
 #SBATCH --chdir=/scratch/project_2017385/dorian/Churro_copy
 #SBATCH --output=logs/tuner_simple_worker_%j.out
 #SBATCH --error=logs/tuner_simple_worker_%j.err

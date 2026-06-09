@@ -2,11 +2,11 @@
 #SBATCH --job-name=tuner_simple_Finnish
 #SBATCH --account=project_2017385
 #SBATCH --partition=medium
-#SBATCH --time=04:00:00
+#SBATCH --time=02:00:00
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=4
-#SBATCH --mem=48G
+#SBATCH --mem=24G
 #SBATCH --chdir=/scratch/project_2017385/dorian/Churro_copy
 #SBATCH --output=logs/tuner_simple_Finnish_%j.out
 #SBATCH --error=logs/tuner_simple_Finnish_%j.err
@@ -118,6 +118,25 @@ fi
 # Pick the Python entry point, allowing PYTHON_SCRIPT to override it for advanced debugging.
 PYTHON_SCRIPT="${PYTHON_SCRIPT:-${SCRIPT_DIR}/run_tuner_simple.py}"
 
+
+build_cython_accelerators() {
+  if [[ "${TUNER_SIMPLE_SKIP_CYTHON_BUILD:-0}" == "1" ]]; then
+    echo "[cython] skipped because TUNER_SIMPLE_SKIP_CYTHON_BUILD=1"
+    return 0
+  fi
+  if [[ ! -f "${SCRIPT_DIR}/cython_accel/build.py" ]]; then
+    echo "[cython] skipped because ${SCRIPT_DIR}/cython_accel/build.py was not found"
+    return 0
+  fi
+  echo "[cython] building tuner_simple accelerators in ${SCRIPT_DIR}"
+  if (cd "${SCRIPT_DIR}" && python3 cython_accel/build.py build_ext --inplace >/dev/null); then
+    echo "[cython] tuner_simple accelerators are ready"
+  else
+    echo "[cython] WARNING: accelerator build failed; Python fallback will be used" >&2
+  fi
+}
+
+build_cython_accelerators
 # Start the Python argument list with the user arguments exactly as they were passed to this wrapper.
 python_arguments=("$@")
 
