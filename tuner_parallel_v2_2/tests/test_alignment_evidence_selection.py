@@ -6,11 +6,14 @@ import pytest
 
 from tuner_parallel_v2_2.metrics.alignment_quality_score import (
     compute_alignment_evidence_selection_score,
+    compute_harmonic_tuning_score,
     compute_line_guided_fraction,
+    compute_non_hallucination_weighted_tuning_score,
     compute_score_matrix_support_from_lines,
 )
 from tuner_parallel_v2_2.tuner.hough_eval import (
     SELECTION_OBJECTIVE_ALIGNMENT_EVIDENCE,
+    SELECTION_OBJECTIVE_NON_HALLUCINATION_WEIGHTED,
     SELECTION_OBJECTIVE_STRICT_QUALITY,
     pick_better_eval,
 )
@@ -81,4 +84,62 @@ def test_alignment_evidence_selection_can_choose_lower_tuning_score_when_matrix_
             selection_objective=SELECTION_OBJECTIVE_ALIGNMENT_EVIDENCE,
         )
         is matrix_supported_row
+    )
+
+
+def _row_with_harmonic_scores(*, weighted_nls: float, coverage: float, hallucination: float) -> dict:
+    """Build the smallest valid eval row needed by the objective-ranking tests."""
+    return {
+        "is_valid": True,
+        "tuning_score": compute_harmonic_tuning_score(
+            weighted_along_lines_nls=weighted_nls,
+            correct_ref_coverage=coverage,
+            hallucination=hallucination,
+        ),
+        "non_hallucination_weighted_tuning_score": compute_non_hallucination_weighted_tuning_score(
+            weighted_along_lines_nls=weighted_nls,
+            correct_ref_coverage=coverage,
+            hallucination=hallucination,
+        ),
+        "weighted_along_lines_nls": weighted_nls,
+        "correct_ref_coverage": coverage,
+        "hallucination": hallucination,
+        "line_guided_columns": 0,
+        "fallback_columns": 0,
+    }
+
+
+def test_non_hallucination_weighted_objective_can_prefer_less_hallucination() -> None:
+    """The new option should only change ranking when explicitly selected."""
+    high_text_quality_row = _row_with_harmonic_scores(
+        weighted_nls=0.99,
+        coverage=0.99,
+        hallucination=0.30,
+    )
+    low_hallucination_row = _row_with_harmonic_scores(
+        weighted_nls=0.80,
+        coverage=0.80,
+        hallucination=0.0,
+    )
+
+    assert high_text_quality_row["tuning_score"] > low_hallucination_row["tuning_score"]
+    assert (
+        high_text_quality_row["non_hallucination_weighted_tuning_score"]
+        < low_hallucination_row["non_hallucination_weighted_tuning_score"]
+    )
+    assert (
+        pick_better_eval(
+            high_text_quality_row,
+            low_hallucination_row,
+            selection_objective=SELECTION_OBJECTIVE_STRICT_QUALITY,
+        )
+        is high_text_quality_row
+    )
+    assert (
+        pick_better_eval(
+            high_text_quality_row,
+            low_hallucination_row,
+            selection_objective=SELECTION_OBJECTIVE_NON_HALLUCINATION_WEIGHTED,
+        )
+        is low_hallucination_row
     )

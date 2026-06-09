@@ -36,21 +36,26 @@ LINE_GAP_START="0"
 LINE_GAP_END="15"
 ALIGN_MIN_IOU_THRESHOLD="0.035"
 MINIMUM_SCORE_FLOOR="20.0"
+SCORE_FLOOR_METHOD="mean_plus_standard_deviation"
 MEDIAN_ABSOLUTE_DEVIATION_MULTIPLIER="0.0"
 MEDIAN_ABSOLUTE_DEVIATION_BACKEND="manual_numpy"
-NEAR_PEAK_RATIO="0.90"
+NEAR_PEAK_RATIO="0.70"
 NEAR_PEAK_MARGIN=""
 MINIMUM_COMPONENT_CELLS="2"
 MINIMUM_COMPONENT_ROWS="1"
 MINIMUM_COMPONENT_COLUMNS="1"
 CONNECTED_COMPONENT_BACKEND="cython"
 REGION_DILATION_RADIUS="1"
-MINIMUM_ACTIVE_CELLS="3"
+FINAL_HOUGH_INPUT_MODE="roi"
+ADAPTIVE_BUDGET_MASK="strong_match"
+MINIMUM_ACTIVE_CELLS="0"
 MINIMUM_ACTIVE_ROWS="2"
 MINIMUM_ACTIVE_COLUMNS="2"
-MINIMUM_X_SPAN="1"
-MINIMUM_Y_SPAN="1"
-MAXIMUM_ACTIVE_FRACTION="0.08"
+MINIMUM_X_SPAN="2"
+MINIMUM_Y_SPAN="2"
+MAXIMUM_ACTIVE_FRACTION="1.0"
+MINIMUM_MATRIX_ROWS="4"
+MINIMUM_MATRIX_COLUMNS="4"
 MIN_SURVIVING_LINE_NLS=""
 MIN_SURVIVING_LINE_NLS_WAS_SET="0"
 SELECTION_OBJECTIVE="strict_quality"
@@ -107,20 +112,26 @@ Common options:
   --hough-threshold-range <start> <end>       Inclusive threshold range
   --line-length-range <start> <end>           Inclusive line_length range
   --line-gap-range <start> <end>              Inclusive line_gap range
-  --minimum-score-floor <float>              Minimum score a cell must reach before Hough preprocessing
-  --median-absolute-deviation-multiplier <f>  Median Absolute Deviation multiplier for adaptive score floor
+  --minimum-score-floor <float>              Minimum score used by the Median Absolute Deviation floor method
+  --score-floor-method <name>                 mean_plus_standard_deviation|median_plus_scaled_median_absolute_deviation
+  --median-absolute-deviation-multiplier <f>  Median Absolute Deviation multiplier when that floor method is active
   --median-absolute-deviation-backend <name>  manual_numpy|scipy
   --connected-component-backend <name>        cython|scipy|python, default: cython
   --near-peak-ratio <float>                   Keep cells near the best score in their row or column
-  --maximum-active-fraction <float>           Reject masks that keep too much of the matrix active
+  --final-hough-input-mode <name>             roi|roi_and_score_floor|roi_or_score_floor
+  --adaptive-budget-mask <name>               final_hough_input|region_of_interest|strong_match|component_region|score_floor
+  --maximum-active-fraction <float>           Optional fixed density gate; use 1.0 to leave adaptive budget in charge
+  --minimum-matrix-rows <n>                   Reject matrices with fewer reference-window rows
+  --minimum-matrix-columns <n>                Reject matrices with fewer prediction-window columns
   --min-surviving-line-nls <float>            Optional final-line text-quality filter in [0, 1].
                                                Final ref_to_pred lines below this line-level
                                                normalized Levenshtein value are removed after
                                                geometry filtering. Example: 0.50
-  --selection-objective <name>                 strict_quality|alignment_evidence. strict_quality keeps
-                                               the original tuning_score winner. alignment_evidence
-                                               chooses matrix-supported, line-guided geometry while
-                                               preserving all exported scoring metrics.
+  --selection-objective <name>                 strict_quality|alignment_evidence|non_hallucination_weighted.
+                                               strict_quality keeps the original tuning_score winner.
+                                               alignment_evidence chooses matrix-supported geometry.
+                                               non_hallucination_weighted doubles the
+                                               non-hallucination weight inside the harmonic score.
 
 Matrix/cache options:
   --scores-pkl-ref-to-pred <path>             Ref-to-pred score stream
@@ -266,6 +277,10 @@ while [[ $# -gt 0 ]]; do
       MINIMUM_SCORE_FLOOR="${2:?--minimum-score-floor requires a value}"
       shift 2
       ;;
+    --score-floor-method)
+      SCORE_FLOOR_METHOD="${2:?--score-floor-method requires a value}"
+      shift 2
+      ;;
     --median-absolute-deviation-multiplier|--mad-k)
       MEDIAN_ABSOLUTE_DEVIATION_MULTIPLIER="${2:?--median-absolute-deviation-multiplier requires a value}"
       shift 2
@@ -302,6 +317,14 @@ while [[ $# -gt 0 ]]; do
       REGION_DILATION_RADIUS="${2:?--region-dilation-radius requires a value}"
       shift 2
       ;;
+    --final-hough-input-mode)
+      FINAL_HOUGH_INPUT_MODE="${2:?--final-hough-input-mode requires a value}"
+      shift 2
+      ;;
+    --adaptive-budget-mask)
+      ADAPTIVE_BUDGET_MASK="${2:?--adaptive-budget-mask requires a value}"
+      shift 2
+      ;;
     --minimum-active-cells|--min-active-cells)
       MINIMUM_ACTIVE_CELLS="${2:?--minimum-active-cells requires a value}"
       shift 2
@@ -324,6 +347,14 @@ while [[ $# -gt 0 ]]; do
       ;;
     --maximum-active-fraction|--max-active-fraction)
       MAXIMUM_ACTIVE_FRACTION="${2:?--maximum-active-fraction requires a value}"
+      shift 2
+      ;;
+    --minimum-matrix-rows)
+      MINIMUM_MATRIX_ROWS="${2:?--minimum-matrix-rows requires a value}"
+      shift 2
+      ;;
+    --minimum-matrix-columns)
+      MINIMUM_MATRIX_COLUMNS="${2:?--minimum-matrix-columns requires a value}"
       shift 2
       ;;
     --min-surviving-line-nls)
@@ -486,12 +517,24 @@ if [[ "${REF_TO_REF_CACHE_MODE}" != "off" && "${REF_TO_REF_CACHE_MODE}" != "auto
   echo "[error] --ref-to-ref-cache-mode must be one of: off, auto, read-only" >&2
   exit 1
 fi
+if [[ "${SCORE_FLOOR_METHOD}" != "mean_plus_standard_deviation" && "${SCORE_FLOOR_METHOD}" != "median_plus_scaled_median_absolute_deviation" ]]; then
+  echo "[error] --score-floor-method must be one of: mean_plus_standard_deviation, median_plus_scaled_median_absolute_deviation" >&2
+  exit 1
+fi
+if [[ "${FINAL_HOUGH_INPUT_MODE}" != "roi" && "${FINAL_HOUGH_INPUT_MODE}" != "roi_and_score_floor" && "${FINAL_HOUGH_INPUT_MODE}" != "roi_or_score_floor" ]]; then
+  echo "[error] --final-hough-input-mode must be one of: roi, roi_and_score_floor, roi_or_score_floor" >&2
+  exit 1
+fi
+if [[ "${ADAPTIVE_BUDGET_MASK}" != "final_hough_input" && "${ADAPTIVE_BUDGET_MASK}" != "region_of_interest" && "${ADAPTIVE_BUDGET_MASK}" != "strong_match" && "${ADAPTIVE_BUDGET_MASK}" != "component_region" && "${ADAPTIVE_BUDGET_MASK}" != "score_floor" ]]; then
+  echo "[error] --adaptive-budget-mask must be one of: final_hough_input, region_of_interest, strong_match, component_region, score_floor" >&2
+  exit 1
+fi
 if [[ "${COMBINATION_BUNDLE_SCOPE}" != "none" && "${COMBINATION_BUNDLE_SCOPE}" != "winner-only" && "${COMBINATION_BUNDLE_SCOPE}" != "all" && "${COMBINATION_BUNDLE_SCOPE}" != "valid-only" && "${COMBINATION_BUNDLE_SCOPE}" != "invalid-only" ]]; then
   echo "[error] --combination-bundle-scope must be one of: none, winner-only, all, valid-only, invalid-only" >&2
   exit 1
 fi
-if [[ "${SELECTION_OBJECTIVE}" != "strict_quality" && "${SELECTION_OBJECTIVE}" != "alignment_evidence" ]]; then
-  echo "[error] --selection-objective must be one of: strict_quality, alignment_evidence" >&2
+if [[ "${SELECTION_OBJECTIVE}" != "strict_quality" && "${SELECTION_OBJECTIVE}" != "alignment_evidence" && "${SELECTION_OBJECTIVE}" != "non_hallucination_weighted" ]]; then
+  echo "[error] --selection-objective must be one of: strict_quality, alignment_evidence, non_hallucination_weighted" >&2
   exit 1
 fi
 if [[ "${WITH_VISUALS}" != "0" && "${WITH_VISUALS}" != "1" ]]; then
@@ -657,6 +700,7 @@ EOF
     --line-gap-range "${LINE_GAP_START}" "${LINE_GAP_END}"
     --align-min-iou-threshold "${ALIGN_MIN_IOU_THRESHOLD}"
     --minimum-score-floor "${MINIMUM_SCORE_FLOOR}"
+    --score-floor-method "${SCORE_FLOOR_METHOD}"
     --median-absolute-deviation-multiplier "${MEDIAN_ABSOLUTE_DEVIATION_MULTIPLIER}"
     --median-absolute-deviation-backend "${MEDIAN_ABSOLUTE_DEVIATION_BACKEND}"
     --near-peak-ratio "${NEAR_PEAK_RATIO}"
@@ -665,12 +709,16 @@ EOF
     --minimum-component-columns "${MINIMUM_COMPONENT_COLUMNS}"
     --connected-component-backend "${CONNECTED_COMPONENT_BACKEND}"
     --region-dilation-radius "${REGION_DILATION_RADIUS}"
+    --final-hough-input-mode "${FINAL_HOUGH_INPUT_MODE}"
+    --adaptive-budget-mask "${ADAPTIVE_BUDGET_MASK}"
     --minimum-active-cells "${MINIMUM_ACTIVE_CELLS}"
     --minimum-active-rows "${MINIMUM_ACTIVE_ROWS}"
     --minimum-active-columns "${MINIMUM_ACTIVE_COLUMNS}"
     --minimum-x-span "${MINIMUM_X_SPAN}"
     --minimum-y-span "${MINIMUM_Y_SPAN}"
     --maximum-active-fraction "${MAXIMUM_ACTIVE_FRACTION}"
+    --minimum-matrix-rows "${MINIMUM_MATRIX_ROWS}"
+    --minimum-matrix-columns "${MINIMUM_MATRIX_COLUMNS}"
     --selection-objective "${SELECTION_OBJECTIVE}"
     --text-metrics-v212-dir "${TEXT_METRICS_V212_DIR}"
     --ref-to-ref-cache-mode "${REF_TO_REF_CACHE_MODE}"

@@ -141,10 +141,14 @@ Hough grid flags:
 - `--hough-threshold-range <start> <end>`: inclusive integer threshold range passed to `skimage.transform.probabilistic_hough_line`. Higher thresholds require stronger evidence in Hough space.
 - `--line-length-range <start> <end>`: inclusive integer `line_length` range passed to probabilistic Hough. Larger values require longer raw candidate segments.
 - `--line-gap-range <start> <end>`: inclusive integer `line_gap` range passed to probabilistic Hough. Larger values allow larger gaps between points on a candidate segment.
-- `--minimum-score-floor <float>`: minimum score a matrix cell must reach before it can vote in Region of Interest Hough preprocessing.
-- `--median-absolute-deviation-multiplier <float>`: multiplier applied to the scaled Median Absolute Deviation when building the adaptive score floor.
-- `--near-peak-ratio <float>`: keeps cells near the best score in their reference row or prediction column.
-- `--maximum-active-fraction <float>`: rejects Hough inputs that keep too much of the matrix active.
+- `--score-floor-method <name>`: chooses how the preprocessing score floor is calculated. The default is `mean_plus_standard_deviation`, which uses the document score-matrix mean plus one population standard deviation. `median_plus_scaled_median_absolute_deviation` keeps the earlier Median Absolute Deviation path for comparison.
+- `--minimum-score-floor <float>`: minimum score used by the Median Absolute Deviation score-floor method. The default `mean_plus_standard_deviation` method does not apply this hard floor.
+- `--median-absolute-deviation-multiplier <float>`: multiplier applied to the scaled Median Absolute Deviation when the Median Absolute Deviation score-floor method is selected.
+- `--near-peak-ratio <float>`: keeps cells near the best score in their reference row or prediction column. The current default is `0.70`.
+- `--final-hough-input-mode <name>`: chooses which mask becomes the binary Hough input. The default `roi` sends the full dilated Region of Interest to Hough. `roi_and_score_floor` keeps the older intersection behavior.
+- `--adaptive-budget-mask <name>`: chooses which mask is checked against the adaptive voter budget. The default `strong_match` checks the score-floor-and-near-peak mask before dilation.
+- `--maximum-active-fraction <float>`: optional fixed density gate for the final Hough input. Use `1.0` to leave the adaptive budget in charge.
+- `--minimum-matrix-rows <n>` and `--minimum-matrix-columns <n>`: reject matrices that are too small to produce a meaningful Hough input. The current default is `4 x 4`.
 - `--align-min-iou-threshold <float>`: minimum true-IoU overlap threshold used when deciding whether two candidate line coverages belong in the same merge component.
 
 Matrix and cache flags:
@@ -312,12 +316,15 @@ Dynamic-pool safety rule: document preparation must stay lazy. It pulls exactly 
 The Hough context is precomputed once per matrix:
 
 1. Coerce the score matrix into a clean numeric array.
-2. Compute finite-score statistics, including the median and Median Absolute Deviation.
-3. Build a score floor from the user minimum and the optional adaptive Median Absolute Deviation term.
-4. Keep cells that pass the score floor and are near the best score in their reference row or prediction column.
-5. Keep connected Region of Interest components that are large enough to be useful for Hough line detection.
-6. Build a binary Hough input from the intersection of strong score evidence and the Region of Interest mask.
-5. Store both the thresholded Hough image and a boolean active-cell mask.
+2. Reject matrices smaller than the configured minimum row and column counts. The default minimum is `4 x 4`.
+3. Compute finite-score statistics: minimum, mean, median, maximum, population standard deviation, and scaled Median Absolute Deviation.
+4. Build the score floor. The default is `mean + standard_deviation`; the Median Absolute Deviation floor remains available as an explicit option.
+5. Build `score_floor_mask`, then build `near_peak_score_mask` from row-wise and column-wise local peaks.
+6. Build `strong_match_mask = score_floor_mask AND near_peak_score_mask`.
+7. Label connected components in `strong_match_mask`, keep components that pass the configured component-size gates, and dilate the kept component mask into the Region of Interest.
+8. Build the final binary Hough input. The default `roi` mode sends the full dilated Region of Interest to Hough. The `roi_and_score_floor` mode keeps the older intersection behavior.
+9. Check geometry gates, the optional fixed active-fraction gate, and the adaptive budget gate. The default adaptive budget checks `strong_match_mask` and allows at most `floor((score_floor / 100) * matrix_cell_count)` checked cells.
+10. Store the Hough image, the final active-cell mask, the Region of Interest mask, the strong-match mask, and the score-floor/near-peak masks for diagnostics and visualisation.
 
 For each Hough combination, detection calls `skimage.transform.probabilistic_hough_line` with:
 

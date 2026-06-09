@@ -4,11 +4,16 @@ import numpy as np
 import pytest
 
 from tuner_parallel_v2_2.hough_preprocessing import (
+    ADAPTIVE_BUDGET_MASK_STRONG_MATCH,
     CONNECTED_COMPONENT_BACKEND_CYTHON,
     CONNECTED_COMPONENT_BACKEND_SCIPY,
+    FINAL_HOUGH_INPUT_MODE_REGION_OF_INTEREST,
+    FINAL_HOUGH_INPUT_MODE_REGION_OF_INTEREST_AND_SCORE_FLOOR,
     HoughPreprocessingConfig,
     MEDIAN_ABSOLUTE_DEVIATION_BACKEND_MANUAL_NUMPY,
     MEDIAN_ABSOLUTE_DEVIATION_BACKEND_SCIPY,
+    SCORE_FLOOR_METHOD_MEAN_PLUS_STANDARD_DEVIATION,
+    SCORE_FLOOR_METHOD_MEDIAN_PLUS_SCALED_MEDIAN_ABSOLUTE_DEVIATION,
     build_region_of_interest_hough_context,
 )
 from tuner_parallel_v2_2.hough_preprocessing.matrix_statistics import (
@@ -48,33 +53,57 @@ def test_repeated_high_scores_in_one_reference_row_are_preserved() -> None:
     assert bool(strong_match_mask[1, 2])
 
 
-def test_weak_row_winners_do_not_survive_the_absolute_score_floor() -> None:
+def test_previous_median_absolute_deviation_floor_remains_available() -> None:
     matrix = np.zeros((4, 4), dtype=float)
     matrix[2, 2] = 12.0
 
-    config = HoughPreprocessingConfig(minimum_score_floor=20.0, median_absolute_deviation_multiplier=0.0)
-    context = build_region_of_interest_hough_context(matrix, config=config)
-
-    assert not bool(context["hough_preprocessing_accepted"])
-    assert context["hough_preprocessing_rejection_reason"] == "no_strong_match_evidence"
-    assert int(np.count_nonzero(context["hough_mask_bool"])) == 0
-
-
-def test_dense_full_matrix_evidence_is_rejected_as_ambiguous() -> None:
-    matrix = np.full((10, 10), 50.0, dtype=float)
     config = HoughPreprocessingConfig(
         minimum_score_floor=20.0,
+        score_floor_method=SCORE_FLOOR_METHOD_MEDIAN_PLUS_SCALED_MEDIAN_ABSOLUTE_DEVIATION,
         median_absolute_deviation_multiplier=0.0,
-        maximum_active_fraction=0.08,
     )
     context = build_region_of_interest_hough_context(matrix, config=config)
 
     assert not bool(context["hough_preprocessing_accepted"])
-    assert context["hough_preprocessing_rejection_reason"] == "ambiguous_or_too_dense"
-    assert context["hough_preprocessing_summary"]["active_fraction"] == pytest.approx(1.0)
+    assert context["hough_preprocessing_rejection_reason"] == "no_score_at_or_above_floor"
+    assert int(np.count_nonzero(context["hough_mask_bool"])) == 0
 
 
-def test_dilation_does_not_add_weak_cells_to_hough_input() -> None:
+def test_mean_plus_standard_deviation_score_floor_matches_document_statistics() -> None:
+    matrix = np.zeros((4, 4), dtype=float)
+    matrix[2, 2] = 100.0
+
+    config = HoughPreprocessingConfig(
+        score_floor_method=SCORE_FLOOR_METHOD_MEAN_PLUS_STANDARD_DEVIATION,
+        minimum_active_rows=1,
+        minimum_active_columns=1,
+        minimum_x_span=1,
+        minimum_y_span=1,
+    )
+    context = build_region_of_interest_hough_context(matrix, config=config)
+    summary = context["hough_preprocessing_summary"]
+
+    expected_score_floor = float(np.mean(matrix)) + float(np.std(matrix, ddof=0))
+    assert summary["score_floor_method"] == SCORE_FLOOR_METHOD_MEAN_PLUS_STANDARD_DEVIATION
+    assert summary["score_floor"] == pytest.approx(expected_score_floor)
+    assert summary["score_standard_deviation"] == pytest.approx(float(np.std(matrix, ddof=0)))
+
+
+def test_dense_full_matrix_evidence_is_rejected_by_adaptive_budget() -> None:
+    matrix = np.full((10, 10), 50.0, dtype=float)
+    config = HoughPreprocessingConfig(maximum_active_fraction=1.0)
+    context = build_region_of_interest_hough_context(matrix, config=config)
+    summary = context["hough_preprocessing_summary"]
+
+    assert not bool(context["hough_preprocessing_accepted"])
+    assert context["hough_preprocessing_rejection_reason"] == "too_many_hough_voter_cells_for_adaptive_budget"
+    assert summary["active_fraction"] == pytest.approx(1.0)
+    assert summary["adaptive_budget_mask"] == ADAPTIVE_BUDGET_MASK_STRONG_MATCH
+    assert summary["adaptive_budget_checked_cell_count"] == 100
+    assert summary["adaptive_budget_allowed_cell_count"] == 50
+
+
+def test_legacy_roi_and_score_floor_mode_keeps_dilation_out_of_hough_input() -> None:
     matrix = np.zeros((5, 5), dtype=float)
     matrix[2, 2] = 90.0
     matrix[2, 3] = 89.0
@@ -83,6 +112,7 @@ def test_dilation_does_not_add_weak_cells_to_hough_input() -> None:
         minimum_score_floor=20.0,
         median_absolute_deviation_multiplier=0.0,
         region_dilation_radius=2,
+        final_hough_input_mode=FINAL_HOUGH_INPUT_MODE_REGION_OF_INTEREST_AND_SCORE_FLOOR,
         minimum_active_cells=2,
         minimum_active_rows=1,
         minimum_active_columns=2,
@@ -93,6 +123,37 @@ def test_dilation_does_not_add_weak_cells_to_hough_input() -> None:
 
     assert int(np.count_nonzero(context["region_of_interest_mask_bool"])) > 2
     assert int(np.count_nonzero(context["hough_mask_bool"])) == 2
+
+
+def test_default_roi_mode_uses_dilated_region_as_hough_input() -> None:
+    matrix = np.zeros((5, 5), dtype=float)
+    matrix[2, 2] = 90.0
+    matrix[2, 3] = 89.0
+
+    config = HoughPreprocessingConfig(
+        region_dilation_radius=2,
+        final_hough_input_mode=FINAL_HOUGH_INPUT_MODE_REGION_OF_INTEREST,
+        minimum_active_cells=0,
+        minimum_active_rows=1,
+        minimum_active_columns=2,
+        minimum_y_span=1,
+        maximum_active_fraction=1.0,
+    )
+    context = build_region_of_interest_hough_context(matrix, config=config)
+
+    assert np.array_equal(context["hough_mask_bool"], context["region_of_interest_mask_bool"])
+    assert int(np.count_nonzero(context["hough_mask_bool"])) > int(np.count_nonzero(context["strong_match_mask_bool"]))
+
+
+def test_too_small_matrix_is_rejected_before_thresholding() -> None:
+    matrix = np.eye(3, dtype=float) * 90.0
+
+    context = build_region_of_interest_hough_context(matrix)
+
+    assert not bool(context["hough_preprocessing_accepted"])
+    assert context["hough_preprocessing_rejection_reason"] == "matrix_smaller_than_configured_minimum"
+    assert context["hough_preprocessing_summary"]["minimum_matrix_rows"] == 4
+    assert context["hough_preprocessing_summary"]["minimum_matrix_columns"] == 4
 
 
 def test_manual_median_absolute_deviation_matches_scipy_normal_scale() -> None:
@@ -124,6 +185,7 @@ def test_score_matrix_statistics_records_selected_deviation_backend() -> None:
     assert stats.finite_value_count == 4
     assert stats.score_median == pytest.approx(15.0)
     assert stats.score_maximum == pytest.approx(30.0)
+    assert stats.score_standard_deviation == pytest.approx(float(np.std(matrix, ddof=0)))
     assert stats.median_absolute_deviation_backend == MEDIAN_ABSOLUTE_DEVIATION_BACKEND_MANUAL_NUMPY
 
 

@@ -43,12 +43,18 @@ try:
     )
     from .matrices.runfile_selection import select_run_items_for_tuning
     from .hough_preprocessing import (
+        ADAPTIVE_BUDGET_MASK_STRONG_MATCH,
         CONNECTED_COMPONENT_BACKEND_CYTHON,
         CONNECTED_COMPONENT_BACKEND_PYTHON,
         CONNECTED_COMPONENT_BACKEND_SCIPY,
+        FINAL_HOUGH_INPUT_MODE_REGION_OF_INTEREST,
         HoughPreprocessingConfig,
         MEDIAN_ABSOLUTE_DEVIATION_BACKEND_MANUAL_NUMPY,
         MEDIAN_ABSOLUTE_DEVIATION_BACKEND_SCIPY,
+        SCORE_FLOOR_METHOD_MEAN_PLUS_STANDARD_DEVIATION,
+        SUPPORTED_ADAPTIVE_BUDGET_MASKS,
+        SUPPORTED_FINAL_HOUGH_INPUT_MODES,
+        SUPPORTED_SCORE_FLOOR_METHODS,
     )
     from .dynamic_pool.document_pool import (
         DocumentLease,
@@ -80,12 +86,18 @@ except ImportError:
     )
     from matrices.runfile_selection import select_run_items_for_tuning  # type: ignore
     from hough_preprocessing import (  # type: ignore
+        ADAPTIVE_BUDGET_MASK_STRONG_MATCH,
         CONNECTED_COMPONENT_BACKEND_CYTHON,
         CONNECTED_COMPONENT_BACKEND_PYTHON,
         CONNECTED_COMPONENT_BACKEND_SCIPY,
+        FINAL_HOUGH_INPUT_MODE_REGION_OF_INTEREST,
         HoughPreprocessingConfig,
         MEDIAN_ABSOLUTE_DEVIATION_BACKEND_MANUAL_NUMPY,
         MEDIAN_ABSOLUTE_DEVIATION_BACKEND_SCIPY,
+        SCORE_FLOOR_METHOD_MEAN_PLUS_STANDARD_DEVIATION,
+        SUPPORTED_ADAPTIVE_BUDGET_MASKS,
+        SUPPORTED_FINAL_HOUGH_INPUT_MODES,
+        SUPPORTED_SCORE_FLOOR_METHODS,
     )
     from dynamic_pool.document_pool import (  # type: ignore
         DocumentLease,
@@ -241,14 +253,25 @@ def parse_args() -> argparse.Namespace:
         "--min-score",
         type=float,
         default=20.0,
-        help="Minimum chrF score a matrix cell must reach before it can vote in Hough preprocessing",
+        help="Minimum chrF score used by the Median Absolute Deviation score-floor method",
+    )
+    parser.add_argument(
+        "--score-floor-method",
+        choices=tuple(SUPPORTED_SCORE_FLOOR_METHODS),
+        default=SCORE_FLOOR_METHOD_MEAN_PLUS_STANDARD_DEVIATION,
+        help=(
+            "How the preprocessing score floor is calculated. "
+            "mean_plus_standard_deviation uses the document mean plus one population "
+            "standard deviation. median_plus_scaled_median_absolute_deviation keeps "
+            "the previous Median Absolute Deviation path and applies --minimum-score-floor."
+        ),
     )
     parser.add_argument(
         "--median-absolute-deviation-multiplier",
         "--mad-k",
         type=float,
         default=0.0,
-        help="Multiplier applied to the scaled Median Absolute Deviation when building the adaptive score floor",
+        help="Multiplier applied to the scaled Median Absolute Deviation when that score-floor method is selected",
     )
     parser.add_argument(
         "--median-absolute-deviation-backend",
@@ -256,7 +279,7 @@ def parse_args() -> argparse.Namespace:
         default=MEDIAN_ABSOLUTE_DEVIATION_BACKEND_MANUAL_NUMPY,
         help="Implementation used for the scaled Median Absolute Deviation calculation",
     )
-    parser.add_argument("--near-peak-ratio", type=float, default=0.90, help="Keep cells near the best score in their row or column")
+    parser.add_argument("--near-peak-ratio", type=float, default=0.70, help="Keep cells near the best score in their row or column")
     parser.add_argument("--near-peak-margin", type=float, default=None, help="Optional score-distance margin for near-peak cells")
     parser.add_argument("--minimum-component-cells", "--min-component-cells", type=int, default=2, help="Minimum cell count for a connected Region of Interest component")
     parser.add_argument("--minimum-component-rows", "--min-component-rows", type=int, default=1, help="Minimum row count for a connected Region of Interest component")
@@ -271,13 +294,27 @@ def parse_args() -> argparse.Namespace:
         default=CONNECTED_COMPONENT_BACKEND_CYTHON,
         help="Backend for connected Region of Interest labeling; Cython is the default, SciPy is optional",
     )
-    parser.add_argument("--region-dilation-radius", "--dilation-radius", type=int, default=1, help="How many cells the kept Region of Interest may expand before the final evidence intersection")
-    parser.add_argument("--minimum-active-cells", "--min-active-cells", type=int, default=5, help="Minimum active cells required in the final binary Hough input")
+    parser.add_argument("--region-dilation-radius", "--dilation-radius", type=int, default=1, help="How many cells the kept Region of Interest may expand before the final Hough input is built")
+    parser.add_argument(
+        "--final-hough-input-mode",
+        choices=tuple(SUPPORTED_FINAL_HOUGH_INPUT_MODES),
+        default=FINAL_HOUGH_INPUT_MODE_REGION_OF_INTEREST,
+        help="Choose which mask becomes the final binary Hough input after the Region of Interest is built",
+    )
+    parser.add_argument(
+        "--adaptive-budget-mask",
+        choices=tuple(SUPPORTED_ADAPTIVE_BUDGET_MASKS),
+        default=ADAPTIVE_BUDGET_MASK_STRONG_MATCH,
+        help="Choose which mask is checked against the adaptive score-floor/100 Hough-voter budget",
+    )
+    parser.add_argument("--minimum-active-cells", "--min-active-cells", type=int, default=0, help="Minimum active cells required in the final binary Hough input; 0 disables this cell-count gate")
     parser.add_argument("--minimum-active-rows", "--min-active-rows", type=int, default=2, help="Minimum active reference rows required in the final binary Hough input")
     parser.add_argument("--minimum-active-columns", "--min-active-cols", type=int, default=2, help="Minimum active prediction columns required in the final binary Hough input")
     parser.add_argument("--minimum-x-span", "--min-x-span", type=int, default=2, help="Minimum prediction-axis span required in the final binary Hough input")
     parser.add_argument("--minimum-y-span", "--min-y-span", type=int, default=2, help="Minimum reference-axis span required in the final binary Hough input")
-    parser.add_argument("--maximum-active-fraction", "--max-active-fraction", type=float, default=0.08, help="Maximum fraction of matrix cells allowed to remain active after preprocessing")
+    parser.add_argument("--maximum-active-fraction", "--max-active-fraction", type=float, default=1.0, help="Optional fixed maximum fraction of matrix cells allowed to remain active after preprocessing")
+    parser.add_argument("--minimum-matrix-rows", type=int, default=4, help="Reject matrices with fewer reference-window rows before Hough preprocessing")
+    parser.add_argument("--minimum-matrix-columns", type=int, default=4, help="Reject matrices with fewer prediction-window columns before Hough preprocessing")
 
     parser.add_argument(
         "--min-surviving-line-nls",
@@ -300,8 +337,9 @@ def parse_args() -> argparse.Namespace:
         help=(
             "How the tuner chooses the winning Hough combination. strict_quality "
             "keeps the original harmonic tuning score. alignment_evidence prefers "
-            "matrix-supported, line-guided geometry while preserving all exported "
-            "scientific metrics."
+            "matrix-supported, line-guided geometry. non_hallucination_weighted "
+            "uses the same harmonic components as strict_quality, but gives "
+            "non-hallucination double weight."
         ),
     )
 
@@ -481,6 +519,7 @@ def main() -> None:
     )
     hough_preprocessing_config = HoughPreprocessingConfig(
         minimum_score_floor=float(args.minimum_score_floor),
+        score_floor_method=str(args.score_floor_method),
         median_absolute_deviation_multiplier=float(args.median_absolute_deviation_multiplier),
         median_absolute_deviation_backend=str(args.median_absolute_deviation_backend),
         near_peak_ratio=float(args.near_peak_ratio),
@@ -490,12 +529,16 @@ def main() -> None:
         minimum_component_columns=int(args.minimum_component_columns),
         connected_component_backend=str(args.connected_component_backend),
         region_dilation_radius=int(args.region_dilation_radius),
+        final_hough_input_mode=str(args.final_hough_input_mode),
+        adaptive_budget_mask=str(args.adaptive_budget_mask),
         minimum_active_cells=int(args.minimum_active_cells),
         minimum_active_rows=int(args.minimum_active_rows),
         minimum_active_columns=int(args.minimum_active_columns),
         minimum_x_span=int(args.minimum_x_span),
         minimum_y_span=int(args.minimum_y_span),
         maximum_active_fraction=float(args.maximum_active_fraction),
+        minimum_matrix_rows=int(args.minimum_matrix_rows),
+        minimum_matrix_columns=int(args.minimum_matrix_columns),
     )
 
     targets = [str(v) for v in args.target_fname if str(v).strip()]
@@ -535,12 +578,16 @@ def main() -> None:
     log(
         "[hough-preprocessing] "
         "mode=region_of_interest "
+        f"score_floor_method={hough_preprocessing_config.score_floor_method} "
         f"minimum_score_floor={hough_preprocessing_config.minimum_score_floor:.6f} "
         f"median_absolute_deviation_multiplier={hough_preprocessing_config.median_absolute_deviation_multiplier:.6f} "
         f"median_absolute_deviation_backend={hough_preprocessing_config.median_absolute_deviation_backend} "
         f"near_peak_ratio={hough_preprocessing_config.near_peak_ratio:.6f} "
+        f"final_hough_input_mode={hough_preprocessing_config.final_hough_input_mode} "
+        f"adaptive_budget_mask={hough_preprocessing_config.adaptive_budget_mask} "
         f"connected_component_backend={hough_preprocessing_config.connected_component_backend} "
-        f"maximum_active_fraction={hough_preprocessing_config.maximum_active_fraction:.6f}"
+        f"maximum_active_fraction={hough_preprocessing_config.maximum_active_fraction:.6f} "
+        f"minimum_matrix_size={hough_preprocessing_config.minimum_matrix_rows}x{hough_preprocessing_config.minimum_matrix_columns}"
     )
     if selection_index_range is not None:
         log(f"[selection] selection_index_range={selection_index_range[0]}..{selection_index_range[1]}")

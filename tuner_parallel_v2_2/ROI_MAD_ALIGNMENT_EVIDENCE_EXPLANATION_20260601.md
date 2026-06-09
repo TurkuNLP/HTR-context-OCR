@@ -1333,3 +1333,19 @@ Those are related but not identical questions.
 
 This difference matters for repeated text. A model can repeat a correct-looking phrase. The score matrix may legitimately contain multiple high-scoring regions for that same reference text. A selector that only wants one clean global diagonal can make a false move. The `alignment_evidence` selector is designed to give the matrix-supported repeated alignment a chance to survive, while still exporting repetition and hallucination metrics so the model can be punished where it should be punished.
 
+
+
+## 2026-06-05 Preprocessing Update: Mean Plus Standard Deviation ROI Budget
+
+The tuner now includes the preprocessing path that was tested in `results/threshold_test/stdev_vs_mad_20260602/test_selected_document_thresholds.py` with `--plot-method mean_plus_standard_deviation`, `--near-peak-ratio 0.70`, `--final-hough-input-mode roi`, and `--adaptive-budget-mask strong_match`.
+
+The default score floor is now calculated as the finite score-matrix mean plus the population standard deviation. In words, the floor moves upward when the whole matrix has a wider score spread, and it does not use the Median Absolute Deviation multiplier unless the Median Absolute Deviation score-floor method is selected explicitly.
+
+The mask construction is now split into two separate questions:
+
+- What goes into Hough? By default, the final Hough input is the full dilated Region of Interest mask. This lets Hough vote in the local neighbourhood around strong connected evidence instead of only on the original strong-score cells.
+- What is checked for adaptive density? By default, the adaptive budget checks `strong_match_mask`, which is the intersection of the score-floor mask and the near-peak mask before dilation. This keeps the density test focused on the strongest evidence while still allowing the Hough input to include the surrounding Region of Interest.
+
+The adaptive budget allows at most `floor((score_floor / 100) * matrix_cell_count)` checked cells. With the default budget mask, that means a document passes this density gate only when the number of `strong_match_mask` cells is not larger than that document-specific allowance. The optional fixed active-fraction gate remains available; setting it to `1.0` leaves the adaptive budget in charge.
+
+Matrices smaller than the configured minimum size are rejected before Hough preprocessing. The current default minimum is 4 reference-window rows and 4 prediction-window columns.

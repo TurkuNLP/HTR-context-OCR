@@ -24,6 +24,7 @@ class ScoreMatrixStatistics:
     score_mean: float
     score_median: float
     score_maximum: float
+    score_standard_deviation: float
     scaled_median_absolute_deviation: float
     median_absolute_deviation_backend: str
 
@@ -87,6 +88,7 @@ def summarize_score_matrix(
             score_mean=float("nan"),
             score_median=float("nan"),
             score_maximum=float("nan"),
+            score_standard_deviation=0.0,
             scaled_median_absolute_deviation=0.0,
             median_absolute_deviation_backend=str(median_absolute_deviation_backend),
         )
@@ -98,6 +100,7 @@ def summarize_score_matrix(
         score_mean=float(np.mean(finite_values)),
         score_median=median_value,
         score_maximum=float(np.max(finite_values)),
+        score_standard_deviation=float(np.std(finite_values, ddof=0)),
         scaled_median_absolute_deviation=scaled_median_absolute_deviation(
             finite_values,
             median_value=median_value,

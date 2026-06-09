@@ -1,13 +1,25 @@
 from __future__ import annotations
 
-"""Build binary Hough inputs from strong score-matrix regions."""
+"""Build binary Hough inputs from score-matrix Regions of Interest."""
 
+import math
 import time
-from dataclasses import asdict
 
 import numpy as np
 
-from .config import HoughPreprocessingConfig
+from .config import (
+    ADAPTIVE_BUDGET_MASK_COMPONENT_REGION,
+    ADAPTIVE_BUDGET_MASK_FINAL_HOUGH_INPUT,
+    ADAPTIVE_BUDGET_MASK_REGION_OF_INTEREST,
+    ADAPTIVE_BUDGET_MASK_SCORE_FLOOR,
+    ADAPTIVE_BUDGET_MASK_STRONG_MATCH,
+    FINAL_HOUGH_INPUT_MODE_REGION_OF_INTEREST,
+    FINAL_HOUGH_INPUT_MODE_REGION_OF_INTEREST_AND_SCORE_FLOOR,
+    FINAL_HOUGH_INPUT_MODE_REGION_OF_INTEREST_OR_SCORE_FLOOR,
+    HoughPreprocessingConfig,
+    SCORE_FLOOR_METHOD_MEAN_PLUS_STANDARD_DEVIATION,
+    SCORE_FLOOR_METHOD_MEDIAN_PLUS_SCALED_MEDIAN_ABSOLUTE_DEVIATION,
+)
 from .connected_components import active_mask_geometry, dilate_mask, label_connected_components
 from .matrix_statistics import summarize_score_matrix
 
@@ -20,12 +32,27 @@ def _empty_boolean_mask(score_matrix: np.ndarray) -> np.ndarray:
     return np.zeros(matrix.shape, dtype=bool)
 
 
+def _fraction_or_zero(numerator: int, denominator: int) -> float:
+    """Return a stable fraction for summary fields."""
+    if int(denominator) <= 0:
+        return 0.0
+    return float(numerator) / float(denominator)
+
+
+def _clamp_unit_interval(value: float) -> float:
+    """Keep an adaptive fraction inside the usable ``0..1`` range."""
+    if not math.isfinite(float(value)):
+        return 0.0
+    return max(0.0, min(1.0, float(value)))
+
+
 def _context_from_masks(
     *,
     hough_input_mask: np.ndarray,
     score_floor_mask: np.ndarray,
     near_peak_score_mask: np.ndarray,
     strong_match_mask: np.ndarray,
+    component_region_mask: np.ndarray,
     region_of_interest_mask: np.ndarray,
     summary: dict,
     keep_debug_arrays: bool,
@@ -42,11 +69,11 @@ def _context_from_masks(
         "hough_preprocessing_rejection_reason": str(summary.get("rejection_reason", "")),
         "hough_preprocessing_summary": dict(summary),
         "region_of_interest_mask_bool": np.asarray(region_of_interest_mask, dtype=bool),
+        "component_region_mask_bool": np.asarray(component_region_mask, dtype=bool),
         "strong_match_mask_bool": np.asarray(strong_match_mask, dtype=bool),
         "score_floor_mask_bool": np.asarray(score_floor_mask, dtype=bool),
         "near_peak_score_mask_bool": np.asarray(near_peak_score_mask, dtype=bool),
-        # Compatibility aliases keep the existing experiment visualisation code
-        # able to inspect these masks without changing its record reader.
+        # Compatibility aliases keep the existing visualisation code able to inspect these masks.
         "roi_mask_bool": np.asarray(region_of_interest_mask, dtype=bool),
         "strong_evidence_mask_bool": np.asarray(strong_match_mask, dtype=bool),
         "roi_experiment_rejected": not bool(summary.get("accepted", False)),
@@ -58,6 +85,7 @@ def _context_from_masks(
     context["debug_score_floor_mask"] = np.asarray(score_floor_mask, dtype=bool)
     context["debug_near_peak_score_mask"] = np.asarray(near_peak_score_mask, dtype=bool)
     context["debug_strong_match_mask"] = np.asarray(strong_match_mask, dtype=bool)
+    context["debug_component_region_mask"] = np.asarray(component_region_mask, dtype=bool)
     context["debug_region_of_interest_mask"] = np.asarray(region_of_interest_mask, dtype=bool)
     return context
 
@@ -69,6 +97,7 @@ def _build_rejected_context(
     rejection_reason: str,
     started_at: float,
     statistics: dict | None = None,
+    extra_summary: dict | None = None,
     keep_debug_arrays: bool = False,
 ) -> dict:
     """Return a zero-vote Hough context for a rejected matrix."""
@@ -85,23 +114,76 @@ def _build_rejected_context(
     }
     if statistics is not None:
         summary.update(statistics)
+    if extra_summary is not None:
+        summary.update(extra_summary)
     summary.update(active_mask_geometry(empty_mask))
     return _context_from_masks(
         hough_input_mask=empty_mask,
         score_floor_mask=empty_mask,
         near_peak_score_mask=empty_mask,
         strong_match_mask=empty_mask,
+        component_region_mask=empty_mask,
         region_of_interest_mask=empty_mask,
         summary=summary,
         keep_debug_arrays=bool(keep_debug_arrays),
     )
 
 
-def _component_passes_region_gate(
+def _matrix_size_rejection_reason(*, row_count: int, column_count: int, config: HoughPreprocessingConfig) -> str:
+    """Return the configured matrix-size rejection reason, or an empty string."""
+    if int(row_count) >= int(config.minimum_matrix_rows) and int(column_count) >= int(config.minimum_matrix_columns):
+        return ""
+    return "matrix_smaller_than_configured_minimum"
+
+
+def _score_floor_from_statistics(*, statistics, config: HoughPreprocessingConfig) -> tuple[float, dict]:
+    """Return the score floor and the diagnostics that explain how it was calculated."""
+    if config.score_floor_method == SCORE_FLOOR_METHOD_MEAN_PLUS_STANDARD_DEVIATION:
+        raw_score_floor = float(statistics.score_mean) + float(statistics.score_standard_deviation)
+        final_score_floor = float(raw_score_floor)
+        minimum_floor_was_applied = False
+    elif config.score_floor_method == SCORE_FLOOR_METHOD_MEDIAN_PLUS_SCALED_MEDIAN_ABSOLUTE_DEVIATION:
+        raw_score_floor = float(statistics.score_median) + float(config.median_absolute_deviation_multiplier) * float(
+            statistics.scaled_median_absolute_deviation
+        )
+        final_score_floor = max(float(config.minimum_score_floor), float(raw_score_floor))
+        minimum_floor_was_applied = final_score_floor > raw_score_floor
+    else:
+        raise ValueError(f"Unsupported score floor method: {config.score_floor_method!r}")
+
+    return final_score_floor, {
+        "score_floor_method": str(config.score_floor_method),
+        "adaptive_score_floor": float(raw_score_floor),
+        "score_floor": float(final_score_floor),
+        "minimum_score_floor_applied": bool(minimum_floor_was_applied),
+    }
+
+
+def _near_peak_mask_from_matrix(
     *,
-    component,
+    finite_score_matrix: np.ndarray,
+    finite_cell_mask: np.ndarray,
+    score_floor_mask: np.ndarray,
     config: HoughPreprocessingConfig,
-) -> bool:
+) -> tuple[np.ndarray, bool]:
+    """Return cells that are competitive within their own row or column."""
+    if config.near_peak_ratio is None:
+        return np.asarray(score_floor_mask, dtype=bool).copy(), False
+
+    row_peak_scores = np.max(finite_score_matrix, axis=1)
+    column_peak_scores = np.max(finite_score_matrix, axis=0)
+    row_near_peak_mask = finite_score_matrix >= (row_peak_scores[:, None] * float(config.near_peak_ratio))
+    column_near_peak_mask = finite_score_matrix >= (column_peak_scores[None, :] * float(config.near_peak_ratio))
+
+    if config.near_peak_margin is not None:
+        margin = float(config.near_peak_margin)
+        row_near_peak_mask |= finite_score_matrix >= (row_peak_scores[:, None] - margin)
+        column_near_peak_mask |= finite_score_matrix >= (column_peak_scores[None, :] - margin)
+
+    return finite_cell_mask & (row_near_peak_mask | column_near_peak_mask), True
+
+
+def _component_passes_region_gate(*, component, config: HoughPreprocessingConfig) -> bool:
     """Return True when a connected component is large enough to search."""
     return (
         int(component.cell_count) >= int(config.minimum_component_cells)
@@ -110,28 +192,93 @@ def _component_passes_region_gate(
     )
 
 
-def _first_geometry_rejection_reason(
+def _hough_input_mask_from_mode(
+    *,
+    score_floor_mask: np.ndarray,
+    region_of_interest_mask: np.ndarray,
+    config: HoughPreprocessingConfig,
+) -> np.ndarray:
+    """Return the final binary image that will be passed to Hough."""
+    if config.final_hough_input_mode == FINAL_HOUGH_INPUT_MODE_REGION_OF_INTEREST:
+        return np.asarray(region_of_interest_mask, dtype=bool).copy()
+    if config.final_hough_input_mode == FINAL_HOUGH_INPUT_MODE_REGION_OF_INTEREST_AND_SCORE_FLOOR:
+        return np.asarray(region_of_interest_mask, dtype=bool) & np.asarray(score_floor_mask, dtype=bool)
+    if config.final_hough_input_mode == FINAL_HOUGH_INPUT_MODE_REGION_OF_INTEREST_OR_SCORE_FLOOR:
+        return np.asarray(region_of_interest_mask, dtype=bool) | np.asarray(score_floor_mask, dtype=bool)
+    raise ValueError(f"Unsupported final Hough input mode: {config.final_hough_input_mode!r}")
+
+
+def _adaptive_budget_mask_from_name(
+    *,
+    mask_name: str,
+    hough_input_mask: np.ndarray,
+    region_of_interest_mask: np.ndarray,
+    strong_match_mask: np.ndarray,
+    component_region_mask: np.ndarray,
+    score_floor_mask: np.ndarray,
+) -> np.ndarray:
+    """Return the mask that is checked against the adaptive voter budget."""
+    if mask_name == ADAPTIVE_BUDGET_MASK_FINAL_HOUGH_INPUT:
+        return np.asarray(hough_input_mask, dtype=bool)
+    if mask_name == ADAPTIVE_BUDGET_MASK_REGION_OF_INTEREST:
+        return np.asarray(region_of_interest_mask, dtype=bool)
+    if mask_name == ADAPTIVE_BUDGET_MASK_STRONG_MATCH:
+        return np.asarray(strong_match_mask, dtype=bool)
+    if mask_name == ADAPTIVE_BUDGET_MASK_COMPONENT_REGION:
+        return np.asarray(component_region_mask, dtype=bool)
+    if mask_name == ADAPTIVE_BUDGET_MASK_SCORE_FLOOR:
+        return np.asarray(score_floor_mask, dtype=bool)
+    raise ValueError(f"Unsupported adaptive budget mask: {mask_name!r}")
+
+
+def _geometry_rejection_reason_without_density(
     *,
     geometry: dict[str, int | float],
     kept_component_count: int,
     config: HoughPreprocessingConfig,
 ) -> str:
-    """Return the first reason that makes the final Hough input unusable."""
+    """Return the first non-density reason that makes the Hough input unusable."""
     if int(kept_component_count) <= 0:
         return "no_line_like_region_of_interest"
-    if int(geometry["active_cell_count"]) < int(config.minimum_active_cells):
-        return "insufficient_hough_evidence"
+    if int(config.minimum_active_cells) > 0 and int(geometry["active_cell_count"]) < int(config.minimum_active_cells):
+        return "insufficient_hough_voter_cells"
     if int(geometry["active_row_count"]) < int(config.minimum_active_rows):
-        return "insufficient_active_rows"
+        return "insufficient_hough_voter_rows"
     if int(geometry["active_column_count"]) < int(config.minimum_active_columns):
-        return "insufficient_active_columns"
+        return "insufficient_hough_voter_columns"
     if int(geometry["x_span"]) < int(config.minimum_x_span):
         return "insufficient_x_span"
     if int(geometry["y_span"]) < int(config.minimum_y_span):
         return "insufficient_y_span"
-    if float(geometry["active_fraction"]) > float(config.maximum_active_fraction):
-        return "ambiguous_or_too_dense"
     return ""
+
+
+def _fixed_fraction_rejection_reason(*, geometry: dict[str, int | float], config: HoughPreprocessingConfig) -> str:
+    """Return the optional fixed-density rejection reason."""
+    if float(geometry["active_fraction"]) > float(config.maximum_active_fraction):
+        return "too_many_final_hough_voter_cells"
+    return ""
+
+
+def _adaptive_budget_summary(
+    *,
+    score_floor: float,
+    matrix_cell_count: int,
+    adaptive_budget_mask: np.ndarray,
+    config: HoughPreprocessingConfig,
+) -> dict:
+    """Return the adaptive voter-budget diagnostics used by the final decision."""
+    allowed_fraction = _clamp_unit_interval(float(score_floor) / 100.0)
+    allowed_cell_count = int(math.floor(float(allowed_fraction) * float(matrix_cell_count)))
+    checked_cell_count = int(np.count_nonzero(np.asarray(adaptive_budget_mask, dtype=bool)))
+    return {
+        "adaptive_budget_mask": str(config.adaptive_budget_mask),
+        "adaptive_budget_allowed_fraction": float(allowed_fraction),
+        "adaptive_budget_allowed_cell_count": int(allowed_cell_count),
+        "adaptive_budget_checked_cell_count": int(checked_cell_count),
+        "adaptive_budget_checked_fraction": _fraction_or_zero(checked_cell_count, matrix_cell_count),
+        "adaptive_budget_passed": bool(checked_cell_count <= allowed_cell_count),
+    }
 
 
 def build_region_of_interest_hough_context(
@@ -162,6 +309,24 @@ def build_region_of_interest_hough_context(
             keep_debug_arrays=bool(keep_debug_arrays),
         )
 
+    matrix_size_rejection_reason = _matrix_size_rejection_reason(
+        row_count=int(matrix.shape[0]),
+        column_count=int(matrix.shape[1]),
+        config=preprocessing_config,
+    )
+    if matrix_size_rejection_reason:
+        return _build_rejected_context(
+            score_matrix=matrix,
+            config=preprocessing_config,
+            rejection_reason=matrix_size_rejection_reason,
+            started_at=started_at,
+            extra_summary={
+                "minimum_matrix_rows": int(preprocessing_config.minimum_matrix_rows),
+                "minimum_matrix_columns": int(preprocessing_config.minimum_matrix_columns),
+            },
+            keep_debug_arrays=bool(keep_debug_arrays),
+        )
+
     statistics = summarize_score_matrix(
         matrix,
         median_absolute_deviation_backend=preprocessing_config.median_absolute_deviation_backend,
@@ -177,44 +342,31 @@ def build_region_of_interest_hough_context(
             keep_debug_arrays=bool(keep_debug_arrays),
         )
 
-    adaptive_score_floor = float(
-        statistics.score_median
-        + float(preprocessing_config.median_absolute_deviation_multiplier)
-        * float(statistics.scaled_median_absolute_deviation)
+    final_score_floor, score_floor_summary = _score_floor_from_statistics(
+        statistics=statistics,
+        config=preprocessing_config,
     )
-    final_score_floor = float(max(float(preprocessing_config.minimum_score_floor), adaptive_score_floor))
-    statistics_dict.update(
-        {
-            "adaptive_score_floor": adaptive_score_floor,
-            "score_floor": final_score_floor,
-        }
-    )
+    statistics_dict.update(score_floor_summary)
 
     if float(statistics.score_maximum) < final_score_floor:
         return _build_rejected_context(
             score_matrix=matrix,
             config=preprocessing_config,
-            rejection_reason="no_strong_match_evidence",
+            rejection_reason="no_score_at_or_above_floor",
             started_at=started_at,
             statistics=statistics_dict,
             keep_debug_arrays=bool(keep_debug_arrays),
         )
 
-    finite_score_matrix = np.where(np.isfinite(matrix), matrix, -np.inf)
-    score_floor_mask = finite_score_matrix >= final_score_floor
-
-    row_peak_scores = np.max(finite_score_matrix, axis=1)
-    column_peak_scores = np.max(finite_score_matrix, axis=0)
-    row_near_peak_mask = finite_score_matrix >= (row_peak_scores[:, None] * float(preprocessing_config.near_peak_ratio))
-    column_near_peak_mask = finite_score_matrix >= (column_peak_scores[None, :] * float(preprocessing_config.near_peak_ratio))
-
-    if preprocessing_config.near_peak_margin is not None:
-        margin = float(preprocessing_config.near_peak_margin)
-        row_near_peak_mask |= finite_score_matrix >= (row_peak_scores[:, None] - margin)
-        column_near_peak_mask |= finite_score_matrix >= (column_peak_scores[None, :] - margin)
-
     finite_cell_mask = np.isfinite(matrix)
-    near_peak_score_mask = finite_cell_mask & (row_near_peak_mask | column_near_peak_mask)
+    finite_score_matrix = np.where(finite_cell_mask, matrix, -np.inf)
+    score_floor_mask = finite_score_matrix >= final_score_floor
+    near_peak_score_mask, near_peak_filter_used = _near_peak_mask_from_matrix(
+        finite_score_matrix=finite_score_matrix,
+        finite_cell_mask=finite_cell_mask,
+        score_floor_mask=score_floor_mask,
+        config=preprocessing_config,
+    )
     strong_match_mask = score_floor_mask & near_peak_score_mask
 
     component_labels, components, connected_component_backend_used = label_connected_components(
@@ -235,24 +387,68 @@ def build_region_of_interest_hough_context(
         component_region_mask,
         radius=int(preprocessing_config.region_dilation_radius),
     )
-    hough_input_mask = strong_match_mask & region_of_interest_mask
+    hough_input_mask = _hough_input_mask_from_mode(
+        score_floor_mask=score_floor_mask,
+        region_of_interest_mask=region_of_interest_mask,
+        config=preprocessing_config,
+    )
     geometry = active_mask_geometry(hough_input_mask)
-    rejection_reason = _first_geometry_rejection_reason(
+
+    non_density_rejection_reason = _geometry_rejection_reason_without_density(
         geometry=geometry,
         kept_component_count=len(kept_component_labels),
         config=preprocessing_config,
     )
+    fixed_fraction_rejection_reason = _fixed_fraction_rejection_reason(
+        geometry=geometry,
+        config=preprocessing_config,
+    )
+    adaptive_budget_mask = _adaptive_budget_mask_from_name(
+        mask_name=preprocessing_config.adaptive_budget_mask,
+        hough_input_mask=hough_input_mask,
+        region_of_interest_mask=region_of_interest_mask,
+        strong_match_mask=strong_match_mask,
+        component_region_mask=component_region_mask,
+        score_floor_mask=score_floor_mask,
+    )
+    adaptive_budget_summary = _adaptive_budget_summary(
+        score_floor=final_score_floor,
+        matrix_cell_count=int(matrix.size),
+        adaptive_budget_mask=adaptive_budget_mask,
+        config=preprocessing_config,
+    )
+    adaptive_budget_rejection_reason = "" if adaptive_budget_summary["adaptive_budget_passed"] else "too_many_hough_voter_cells_for_adaptive_budget"
+
+    if non_density_rejection_reason:
+        rejection_reason = non_density_rejection_reason
+    elif fixed_fraction_rejection_reason:
+        rejection_reason = fixed_fraction_rejection_reason
+    else:
+        rejection_reason = adaptive_budget_rejection_reason
 
     summary = {
         "accepted": rejection_reason == "",
         "rejection_reason": rejection_reason,
+        "non_density_rejection_reason": non_density_rejection_reason,
+        "fixed_fraction_rejection_reason": fixed_fraction_rejection_reason,
+        "adaptive_budget_rejection_reason": adaptive_budget_rejection_reason,
+        "near_peak_filter_used": bool(near_peak_filter_used),
+        "final_hough_input_mode": str(preprocessing_config.final_hough_input_mode),
         "row_count": int(matrix.shape[0]),
         "column_count": int(matrix.shape[1]),
         "matrix_cell_count": int(matrix.size),
+        "minimum_matrix_rows": int(preprocessing_config.minimum_matrix_rows),
+        "minimum_matrix_columns": int(preprocessing_config.minimum_matrix_columns),
+        "score_floor_cell_count": int(np.count_nonzero(score_floor_mask)),
+        "score_floor_fraction": _fraction_or_zero(int(np.count_nonzero(score_floor_mask)), int(matrix.size)),
+        "near_peak_cell_count": int(np.count_nonzero(near_peak_score_mask)),
+        "near_peak_fraction": _fraction_or_zero(int(np.count_nonzero(near_peak_score_mask)), int(matrix.size)),
         "strong_match_cell_count": int(np.count_nonzero(strong_match_mask)),
-        "strong_match_fraction": float(np.count_nonzero(strong_match_mask) / matrix.size),
+        "strong_match_fraction": _fraction_or_zero(int(np.count_nonzero(strong_match_mask)), int(matrix.size)),
+        "component_region_cell_count": int(np.count_nonzero(component_region_mask)),
+        "component_region_fraction": _fraction_or_zero(int(np.count_nonzero(component_region_mask)), int(matrix.size)),
         "region_of_interest_cell_count": int(np.count_nonzero(region_of_interest_mask)),
-        "region_of_interest_fraction": float(np.count_nonzero(region_of_interest_mask) / matrix.size),
+        "region_of_interest_fraction": _fraction_or_zero(int(np.count_nonzero(region_of_interest_mask)), int(matrix.size)),
         "component_count": int(len(components)),
         "connected_component_backend_requested": preprocessing_config.connected_component_backend,
         "connected_component_backend_used": connected_component_backend_used,
@@ -261,6 +457,7 @@ def build_region_of_interest_hough_context(
         "preprocessing_seconds": float(time.perf_counter() - started_at),
         "config": preprocessing_config.as_dict(),
         **statistics_dict,
+        **adaptive_budget_summary,
         **geometry,
     }
 
@@ -269,6 +466,7 @@ def build_region_of_interest_hough_context(
         score_floor_mask=score_floor_mask,
         near_peak_score_mask=near_peak_score_mask,
         strong_match_mask=strong_match_mask,
+        component_region_mask=component_region_mask,
         region_of_interest_mask=region_of_interest_mask,
         summary=summary,
         keep_debug_arrays=bool(keep_debug_arrays),

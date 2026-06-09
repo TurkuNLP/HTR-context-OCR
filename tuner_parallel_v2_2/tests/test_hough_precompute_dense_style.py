@@ -14,11 +14,7 @@ def test_hough_precompute_uses_binary_region_of_interest_mask() -> None:
     for row_index in range(matrix.shape[0]):
         matrix[row_index, row_index] = 90.0
 
-    config = HoughPreprocessingConfig(
-        minimum_score_floor=20.0,
-        median_absolute_deviation_multiplier=0.0,
-        maximum_active_fraction=0.50,
-    )
+    config = HoughPreprocessingConfig(maximum_active_fraction=0.50)
     hough_context = precompute_hough_context(matrix, config=config, keep_debug_arrays=True)
     hough_image = hough_context["hough_image"]
 
@@ -26,7 +22,8 @@ def test_hough_precompute_uses_binary_region_of_interest_mask() -> None:
     assert bool(hough_context["hough_preprocessing_accepted"])
     assert hough_image.shape == matrix.shape
     assert set(np.unique(hough_image)).issubset({0, 1})
-    assert np.count_nonzero(hough_image) == 5
+    assert np.array_equal(hough_image.astype(bool), hough_context["debug_region_of_interest_mask"])
+    assert np.count_nonzero(hough_image) > np.count_nonzero(hough_context["debug_strong_match_mask"])
     assert np.count_nonzero(hough_image) < hough_image.size
     assert "debug_strong_match_mask" in hough_context
     assert "debug_region_of_interest_mask" in hough_context

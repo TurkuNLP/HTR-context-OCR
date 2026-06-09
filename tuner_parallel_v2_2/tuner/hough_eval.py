@@ -20,6 +20,7 @@ try:
         WeightedAlongLinesResult,
         compute_alignment_evidence_selection_score,
         compute_harmonic_tuning_score,
+        compute_non_hallucination_weighted_tuning_score,
         compute_line_guided_fraction,
         compute_line_level_similarity_records_from_assignment,
         compute_score_matrix_support_from_lines,
@@ -48,6 +49,7 @@ except ImportError:
         WeightedAlongLinesResult,
         compute_alignment_evidence_selection_score,
         compute_harmonic_tuning_score,
+        compute_non_hallucination_weighted_tuning_score,
         compute_line_guided_fraction,
         compute_line_level_similarity_records_from_assignment,
         compute_score_matrix_support_from_lines,
@@ -77,10 +79,12 @@ METRIC_OUTCOME_REASON_LINE_NLS_FILTER_REMOVED_ALL_LINES = "line_nls_filter_remov
 
 SELECTION_OBJECTIVE_STRICT_QUALITY = "strict_quality"
 SELECTION_OBJECTIVE_ALIGNMENT_EVIDENCE = "alignment_evidence"
+SELECTION_OBJECTIVE_NON_HALLUCINATION_WEIGHTED = "non_hallucination_weighted"
 DEFAULT_SELECTION_OBJECTIVE = SELECTION_OBJECTIVE_STRICT_QUALITY
 SUPPORTED_SELECTION_OBJECTIVES = (
     SELECTION_OBJECTIVE_STRICT_QUALITY,
     SELECTION_OBJECTIVE_ALIGNMENT_EVIDENCE,
+    SELECTION_OBJECTIVE_NON_HALLUCINATION_WEIGHTED,
 )
 
 FILTER_PROFILE_TIMING_FIELDS = (
@@ -377,6 +381,21 @@ def evaluation_rank_key(row: dict, *, selection_objective: str = DEFAULT_SELECTI
             -int(row.get(PARAM_HOUGH_SEED, 0)),
         )
 
+    if objective == SELECTION_OBJECTIVE_NON_HALLUCINATION_WEIGHTED:
+        return (
+            _finite_float_for_rank(row.get("non_hallucination_weighted_tuning_score"), float("-inf")),
+            _finite_float_for_rank(row.get("tuning_score"), float("-inf")),
+            _finite_float_for_rank(row.get("weighted_along_lines_nls"), float("-inf")),
+            _finite_float_for_rank(row.get("correct_ref_coverage"), float("-inf")),
+            -float(hallucination),
+            int(row.get("line_guided_columns", 0)),
+            -int(row.get("fallback_columns", 0)),
+            -int(row.get(PARAM_HOUGH_THRESHOLD, 0)),
+            -int(row.get(PARAM_HOUGH_LINE_LENGTH, 0)),
+            -int(row.get(PARAM_HOUGH_LINE_GAP, 0)),
+            -int(row.get(PARAM_HOUGH_SEED, 0)),
+        )
+
     return (
         _finite_float_for_rank(row.get("tuning_score"), float("-inf")),
         _finite_float_for_rank(row.get("weighted_along_lines_nls"), float("-inf")),
@@ -574,6 +593,7 @@ def _invalid_coverage_eval_row(
         "invalid_error_message": str(error),
         "metric_outcome_reason": None,
         "tuning_score": None,
+        "non_hallucination_weighted_tuning_score": None,
         # Keep the single internal weighted value used by ranking; the public
         # report writer renames it to the long human-facing metric label.
         "weighted_along_lines_nls": None if weighted_along_lines_nls is None else float(weighted_along_lines_nls),
@@ -618,6 +638,7 @@ def _line_nls_removed_all_eval_row(
         "invalid_error_message": None,
         "metric_outcome_reason": METRIC_OUTCOME_REASON_LINE_NLS_FILTER_REMOVED_ALL_LINES,
         "tuning_score": 0.0,
+        "non_hallucination_weighted_tuning_score": 0.0,
         "weighted_along_lines_nls": None,
         "line_count": int(weighted_result.scored_line_count),
         "total_line_length": float(weighted_result.total_line_length),
@@ -1036,6 +1057,11 @@ def evaluate_single_combination_values(
         correct_ref_coverage=normalized_coverage_metrics["correct_ref_coverage"],
         hallucination=normalized_coverage_metrics["hallucination"],
     )
+    non_hallucination_weighted_tuning_score = compute_non_hallucination_weighted_tuning_score(
+        weighted_along_lines_nls=weighted_along_lines_nls,
+        correct_ref_coverage=normalized_coverage_metrics["correct_ref_coverage"],
+        hallucination=normalized_coverage_metrics["hallucination"],
+    )
 
     # Drop large temporary arrays as soon as scalar metrics are extracted.
     del coverage_arrays
@@ -1046,6 +1072,7 @@ def evaluate_single_combination_values(
         "invalid_error_message": None,
         "metric_outcome_reason": None,
         "tuning_score": float(tuning_score),
+        "non_hallucination_weighted_tuning_score": float(non_hallucination_weighted_tuning_score),
         # This internal key is intentionally short because it is read often by
         # reducers; output serializers expose the longer report label.
         "weighted_along_lines_nls": None if weighted_along_lines_nls is None else float(weighted_along_lines_nls),
@@ -1106,6 +1133,7 @@ __all__ = [
     "DEFAULT_SELECTION_OBJECTIVE",
     "INVALID_REASON_COVERAGE_Y_DIFF_BELOW_MINUS_ONE",
     "SELECTION_OBJECTIVE_ALIGNMENT_EVIDENCE",
+    "SELECTION_OBJECTIVE_NON_HALLUCINATION_WEIGHTED",
     "SELECTION_OBJECTIVE_STRICT_QUALITY",
     "SUPPORTED_SELECTION_OBJECTIVES",
     "is_finite_tuning_score",

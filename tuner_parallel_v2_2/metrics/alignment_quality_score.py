@@ -442,6 +442,25 @@ def compute_harmonic_tuning_score(
     return clamp_unit_interval(score)
 
 
+def compute_non_hallucination_weighted_tuning_score(
+    *,
+    weighted_along_lines_nls,
+    correct_ref_coverage,
+    hallucination,
+) -> float:
+    """Compute the harmonic tuner score with double weight on non-hallucination."""
+    weighted_nls = clamp_unit_interval(weighted_along_lines_nls)
+    coverage = clamp_unit_interval(correct_ref_coverage)
+    hallucination_rate = clamp_unit_interval(hallucination)
+    non_hallucination = clamp_unit_interval(1.0 - hallucination_rate)
+
+    if weighted_nls <= 0.0 or coverage <= 0.0 or non_hallucination <= 0.0:
+        return 0.0
+
+    score = 4.0 / ((1.0 / weighted_nls) + (1.0 / coverage) + (2.0 / non_hallucination))
+    return clamp_unit_interval(score)
+
+
 __all__ = [
     "LineLevelSimilarityRecord",
     "WeightedAlongLinesResult",
@@ -449,6 +468,7 @@ __all__ = [
     "compute_alignment_evidence_selection_score",
     "compute_balanced_harmonic_mean",
     "compute_harmonic_tuning_score",
+    "compute_non_hallucination_weighted_tuning_score",
     "compute_line_guided_fraction",
     "compute_line_level_similarity_records_from_assignment",
     "compute_weighted_along_lines_similarity_from_bundle",
