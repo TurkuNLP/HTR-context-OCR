@@ -1,10 +1,13 @@
 from __future__ import annotations
 
-"""Score-floor preprocessing for Hough voter masks."""
+"""Pre-Hough score-mask construction for tuner_simple_alpha_sweep."""
 
 from dataclasses import dataclass
+import math
 
 import numpy as np
+
+from tuner_simple_alpha_sweep.cython_accel.optional_threshold_mask import threshold_mask_at_or_above
 
 
 @dataclass(frozen=True)
@@ -15,31 +18,21 @@ class ScoreFloorStatistics:
     score_standard_deviation: float
 
 
-# Ask Python to generate common data-container methods for the class defined next.
 @dataclass(frozen=True)
-# Define the ScoreFloorResult class, which groups related state and behavior for this part of the pipeline.
 class ScoreFloorResult:
     """Statistics and binary masks derived from one score matrix."""
 
-    # Define the score_mean field; it stores the average score of all finite matrix cells, used as the center of the score distribution.
     score_mean: float
-    # Define the score_standard_deviation field; it stores how widely matrix scores spread around the mean, used to raise the floor above ordinary cells.
     score_standard_deviation: float
-    # Define the score_floor_alpha field; it stores the user-selected multiplier that controls how strongly the standard deviation raises the floor.
     score_floor_alpha: float
-    # Define the score_floor field; it stores the numeric cutoff a score must meet before it can become a Hough voter.
     score_floor: float
-    # Define the active_cell_count field; it stores how many matrix cells survived the score floor and became active candidates.
     active_cell_count: int
-    # Define the active_fraction field; it stores the active candidate count divided by the total number of matrix cells.
     active_fraction: float
-    # Define the hough_input_mask field; it stores the boolean matrix passed to Hough, where True means this cell can vote for a line.
     hough_input_mask: np.ndarray
 
 
 def compute_score_floor_statistics(score_matrix: np.ndarray) -> ScoreFloorStatistics:
     """Compute reusable finite-cell statistics for score-floor masks."""
-
     matrix_values = np.asarray(score_matrix, dtype=float)
     finite_values = matrix_values[np.isfinite(matrix_values)]
     if finite_values.size == 0:
@@ -50,37 +43,99 @@ def compute_score_floor_statistics(score_matrix: np.ndarray) -> ScoreFloorStatis
     )
 
 
-def compute_score_floor_mask_from_statistics(
+def build_boolean_threshold_mask(score_matrix: np.ndarray, *, threshold: float) -> np.ndarray:
+    """Return cells at or above threshold, using Cython when the helper is built."""
+    matrix_values = np.ascontiguousarray(score_matrix, dtype=float)
+    cython_mask = threshold_mask_at_or_above(matrix_values, float(threshold))
+    if cython_mask is not None:
+        return np.asarray(cython_mask, dtype=bool)
+    return np.asarray(matrix_values >= float(threshold), dtype=bool)
+
+
+def score_floor_result_from_threshold(
     score_matrix: np.ndarray,
     *,
-    alpha: float,
+    score_floor_alpha: float,
+    score_floor: float,
     statistics: ScoreFloorStatistics,
 ) -> ScoreFloorResult:
-    """Build the Hough mask for one alpha using precomputed matrix statistics."""
-
-    matrix_values = np.asarray(score_matrix, dtype=float)
-    score_mean = float(statistics.score_mean)
-    score_standard_deviation = float(statistics.score_standard_deviation)
-    score_floor = float(score_mean + float(alpha) * score_standard_deviation)
-    hough_input_mask = np.asarray(matrix_values >= score_floor, dtype=bool)
+    """Build the shared result object after a numeric pre-Hough threshold is known."""
+    hough_input_mask = build_boolean_threshold_mask(score_matrix, threshold=float(score_floor))
     active_cell_count = int(np.count_nonzero(hough_input_mask))
     total_cell_count = int(hough_input_mask.size)
     active_fraction = 0.0 if total_cell_count <= 0 else float(active_cell_count / total_cell_count)
     return ScoreFloorResult(
-        score_mean=score_mean,
-        score_standard_deviation=score_standard_deviation,
-        score_floor_alpha=float(alpha),
-        score_floor=score_floor,
+        score_mean=float(statistics.score_mean),
+        score_standard_deviation=float(statistics.score_standard_deviation),
+        score_floor_alpha=float(score_floor_alpha),
+        score_floor=float(score_floor),
         active_cell_count=active_cell_count,
         active_fraction=active_fraction,
         hough_input_mask=hough_input_mask,
     )
 
 
-# Define the compute_score_floor_mask function; its body below performs one named step of the pipeline.
-def compute_score_floor_mask(score_matrix: np.ndarray, *, alpha: float) -> ScoreFloorResult:
-    """Build the simple Hough mask from `mean + alpha * standard deviation`."""
+def compute_score_floor_mask_from_statistics(
+    score_matrix: np.ndarray,
+    *,
+    alpha: float,
+    statistics: ScoreFloorStatistics,
+) -> ScoreFloorResult:
+    """Build the current mean-plus-alpha-standard-deviation Hough mask."""
+    score_floor = float(statistics.score_mean + float(alpha) * statistics.score_standard_deviation)
+    return score_floor_result_from_threshold(
+        score_matrix,
+        score_floor_alpha=float(alpha),
+        score_floor=score_floor,
+        statistics=statistics,
+    )
 
+
+def infer_score_matrix_scale(score_matrix: np.ndarray) -> str:
+    """Return percent for 0-100 matrices and unit for 0-1 matrices."""
+    matrix_values = np.asarray(score_matrix, dtype=float)
+    finite_values = matrix_values[np.isfinite(matrix_values)]
+    if finite_values.size == 0:
+        return "percent"
+    return "percent" if float(np.max(finite_values)) > 1.5 else "unit"
+
+
+def convert_minimum_levenshtein_to_matrix_threshold(
+    score_matrix: np.ndarray,
+    *,
+    minimum_levenshtein: float,
+) -> float:
+    """Convert 0.30 and 30.0 into the same threshold on the matrix scale."""
+    minimum_value = float(minimum_levenshtein)
+    if not math.isfinite(minimum_value) or minimum_value < 0.0:
+        raise ValueError("minimum Levenshtein threshold must be finite and non-negative")
+    matrix_scale = infer_score_matrix_scale(score_matrix)
+    if matrix_scale == "percent":
+        return minimum_value * 100.0 if minimum_value <= 1.0 else minimum_value
+    return minimum_value / 100.0 if minimum_value > 1.0 else minimum_value
+
+
+def compute_minimum_levenshtein_mask(
+    score_matrix: np.ndarray,
+    *,
+    minimum_levenshtein: float,
+    statistics: ScoreFloorStatistics,
+) -> ScoreFloorResult:
+    """Build one fixed-threshold pre-Hough mask from a minimum Levenshtein score."""
+    matrix_threshold = convert_minimum_levenshtein_to_matrix_threshold(
+        score_matrix,
+        minimum_levenshtein=float(minimum_levenshtein),
+    )
+    return score_floor_result_from_threshold(
+        score_matrix,
+        score_floor_alpha=0.0,
+        score_floor=float(matrix_threshold),
+        statistics=statistics,
+    )
+
+
+def compute_score_floor_mask(score_matrix: np.ndarray, *, alpha: float) -> ScoreFloorResult:
+    """Build the current simple Hough mask from mean + alpha * standard deviation."""
     return compute_score_floor_mask_from_statistics(
         score_matrix,
         alpha=float(alpha),
@@ -91,7 +146,11 @@ def compute_score_floor_mask(score_matrix: np.ndarray, *, alpha: float) -> Score
 __all__ = [
     "ScoreFloorResult",
     "ScoreFloorStatistics",
+    "build_boolean_threshold_mask",
+    "compute_minimum_levenshtein_mask",
     "compute_score_floor_mask",
     "compute_score_floor_mask_from_statistics",
     "compute_score_floor_statistics",
+    "convert_minimum_levenshtein_to_matrix_threshold",
+    "infer_score_matrix_scale",
 ]

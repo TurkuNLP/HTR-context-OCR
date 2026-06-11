@@ -7,7 +7,7 @@
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=24G
-#SBATCH --chdir=/scratch/project_2017385/dorian/Churro_copy
+#SBATCH --chdir=/scratch/project_2017385/dorian/HTR-context-OCR
 #SBATCH --output=logs/tuner_simple_Finnish_%j.out
 #SBATCH --error=logs/tuner_simple_Finnish_%j.err
 # Run this file with Bash so arrays, functions, and strict error handling behave consistently.
@@ -49,6 +49,7 @@ Matrix and preprocessing options:
   --alpha-sweep-min <value>             Inclusive minimum alpha for sweep candidates
   --alpha-sweep-max <value>             Inclusive maximum alpha for sweep candidates
   --alpha-sweep-step <value>            Alpha increment between sweep candidates
+  --minimum-pre-hough-levenshtein <v>   Build one fixed Levenshtein pre-Hough mask and skip alpha sweep; 0.30 and 30.0 are equivalent
 
 Hough and filtering options:
   --hough-threshold <n>                  Minimum number of Hough votes needed for a raw line candidate
@@ -72,6 +73,7 @@ PYTHON_SCRIPT, RUNFILE_JSON, OUTPUT_DIR, SCORES_PKL_REF_TO_PRED,
 SCORES_PKL_REF_TO_REF, MAX_ITEMS, WINDOW_SIZE, WINDOW_STRIDE,
 MINIMUM_MATRIX_ROWS, MINIMUM_MATRIX_COLUMNS, SCORE_FLOOR_ALPHA,
 ALPHA_SWEEP_MIN, ALPHA_SWEEP_MAX, ALPHA_SWEEP_STEP,
+MINIMUM_PRE_HOUGH_LEVENSHTEIN,
 HOUGH_THRESHOLD, HOUGH_LINE_LENGTH, HOUGH_LINE_GAP, HOUGH_SEED,
 ALIGN_MIN_IOU_THRESHOLD, MIN_SURVIVING_LINE_NLS, PLOT_MODE, STITCHED_PANEL_COLUMNS, SAVED_FIGURE_DPI
 USAGE
@@ -114,8 +116,8 @@ elif [[ -f "${SCRIPT_SOURCE_DIR}/run_tuner_simple.py" ]]; then
 elif [[ -f "$(pwd)/run_tuner_simple.py" ]]; then
   SCRIPT_DIR="$(pwd)"
 # Fall back to this repository's known absolute location when Slurm only exposes the spool copy.
-elif [[ -f "/scratch/project_2017385/dorian/Churro_copy/tuner_simple_alpha_sweep/run_tuner_simple.py" ]]; then
-  SCRIPT_DIR="/scratch/project_2017385/dorian/Churro_copy/tuner_simple_alpha_sweep"
+elif [[ -f "/scratch/project_2017385/dorian/HTR-context-OCR/tuner_simple_alpha_sweep/run_tuner_simple.py" ]]; then
+  SCRIPT_DIR="/scratch/project_2017385/dorian/HTR-context-OCR/tuner_simple_alpha_sweep"
 else
   echo "ERROR: Could not locate run_tuner_simple.py. Set TUNER_SIMPLE_DIR=/path/to/tuner_simple_alpha_sweep." >&2
   exit 2
@@ -228,6 +230,7 @@ append_env_default "--score-floor-alpha" "SCORE_FLOOR_ALPHA"
 append_env_default "--alpha-sweep-min" "ALPHA_SWEEP_MIN"
 append_env_default "--alpha-sweep-max" "ALPHA_SWEEP_MAX"
 append_env_default "--alpha-sweep-step" "ALPHA_SWEEP_STEP"
+append_env_default "--minimum-pre-hough-levenshtein" "MINIMUM_PRE_HOUGH_LEVENSHTEIN"
 # Add Hough threshold defaults from the environment when requested.
 append_env_default "--hough-threshold" "HOUGH_THRESHOLD"
 # Add Hough line-length defaults from the environment when requested.

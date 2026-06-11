@@ -42,6 +42,7 @@ Important tuner options passed through to each worker:
   --alpha-sweep-min <value>
   --alpha-sweep-max <value>
   --alpha-sweep-step <value>
+  --minimum-pre-hough-levenshtein <v>  Build one fixed Levenshtein pre-Hough mask and skip alpha sweep; 0.30 and 30.0 are equivalent
   --hough-threshold <n>
   --hough-line-length <n>
   --hough-line-gap <n>
@@ -271,7 +272,7 @@ for worker_number in $(seq 1 "${worker_count}"); do
     --time="${time_limit}" \
     --cpus-per-task="${cpus_per_task}" \
     --mem="${memory_request}" \
-        --export="ALL,TUNER_SIMPLE_DIR=${SCRIPT_DIR}" \
+    --export="ALL,TUNER_SIMPLE_DIR=${SCRIPT_DIR}" \
     --job-name="tuner_simple_${worker_id}" \
     --output="${slurm_log_dir}/${worker_id}_%j.out" \
     --error="${slurm_log_dir}/${worker_id}_%j.err" \
@@ -300,7 +301,7 @@ aggregate_job_id="$(sbatch --parsable \
   --time="${aggregate_time_limit}" \
   --cpus-per-task="${cpus_per_task}" \
   --mem="${aggregate_memory_request}" \
-    --export="ALL,TUNER_SIMPLE_DIR=${SCRIPT_DIR}" \
+  --export="ALL,TUNER_SIMPLE_DIR=${SCRIPT_DIR}" \
   --job-name="tuner_simple_aggregate" \
   --output="${slurm_log_dir}/aggregate_%j.out" \
   --error="${slurm_log_dir}/aggregate_%j.err" \

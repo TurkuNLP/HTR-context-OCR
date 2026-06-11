@@ -31,6 +31,11 @@ setup(
                 name="cython_accel.filter_core",
                 sources=[str(THIS_DIR / "filter_core.pyx")],
             ),
+            Extension(
+                name="cython_accel.threshold_mask_core",
+                sources=[str(THIS_DIR / "threshold_mask_core.pyx")],
+                include_dirs=[np.get_include()],
+            ),
         ],
         compiler_directives={"language_level": "3"},
     ),

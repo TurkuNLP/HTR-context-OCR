@@ -12,7 +12,7 @@ from tuner_simple_alpha_sweep.document_selection.document_filters import select_
 from tuner_simple_alpha_sweep.document_selection.runfile_loader import load_runfile_documents
 from tuner_simple_alpha_sweep.matrix_operations.matrix_loader import build_score_matrix_indexes
 from tuner_simple_alpha_sweep.results_writing.flat_csv_tables import write_all_flat_outputs
-from tuner_simple_alpha_sweep.serial_runner.document_runner import document_table_row, process_one_document
+from tuner_simple_alpha_sweep.serial_runner.document_runner import document_table_row, pre_hough_mask_kind, process_one_document
 
 
 # Define the run_simple_tuner function; its body below performs one named step of the pipeline.
@@ -51,7 +51,12 @@ def run_simple_tuner(config: PipelineConfig, *, log) -> dict[str, Any]:
         f"minimum_columns={int(config.minimum_matrix_columns)} "
         f"score_floor_alpha={float(config.score_floor_alpha):.6f}"
     )
-    if bool(config.alpha_sweep_enabled):
+    if config.minimum_pre_hough_levenshtein is not None:
+        log(
+            f"[config] fixed minimum Levenshtein pre-Hough mask enabled "
+            f"minimum={float(config.minimum_pre_hough_levenshtein):.6g}; alpha sweep will be skipped"
+        )
+    elif bool(config.alpha_sweep_enabled):
         log(
             f"[config] alpha sweep enabled min={float(config.alpha_sweep_min):.6f} "
             f"max={float(config.alpha_sweep_max):.6f} "
@@ -248,10 +253,16 @@ def run_simple_tuner(config: PipelineConfig, *, log) -> dict[str, Any]:
         # Add the scores_pkl_ref_to_ref field to the surrounding dictionary so it appears in outputs or returned metadata.
         "scores_pkl_ref_to_ref": str(config.scores_pkl_ref_to_ref),
         # Add the score_floor_formula field to the surrounding dictionary so it appears in outputs or returned metadata.
-        "score_floor_formula": "score_mean + score_floor_alpha * score_standard_deviation",
+        "score_floor_formula": (
+            "score_matrix >= minimum_pre_hough_levenshtein converted to the matrix score scale"
+            if config.minimum_pre_hough_levenshtein is not None
+            else "score_mean + score_floor_alpha * score_standard_deviation"
+        ),
+        "pre_hough_mask_kind": pre_hough_mask_kind(config),
+        "minimum_pre_hough_levenshtein": config.minimum_pre_hough_levenshtein,
         # Add the score_floor_alpha field to the surrounding dictionary so it appears in outputs or returned metadata.
         "score_floor_alpha": float(config.score_floor_alpha),
-        "alpha_sweep_enabled": bool(config.alpha_sweep_enabled),
+        "alpha_sweep_enabled": bool(config.alpha_sweep_enabled) and config.minimum_pre_hough_levenshtein is None,
         "alpha_sweep_min": float(config.alpha_sweep_min),
         "alpha_sweep_max": float(config.alpha_sweep_max),
         "alpha_sweep_step": float(config.alpha_sweep_step),

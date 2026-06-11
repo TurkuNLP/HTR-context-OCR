@@ -33,6 +33,7 @@ from tuner_simple_alpha_sweep.matrix_operations.matrix_shape import (
 from tuner_simple_alpha_sweep.matrix_operations.score_floor import (
     ScoreFloorResult,
     ScoreFloorStatistics,
+    compute_minimum_levenshtein_mask,
     compute_score_floor_mask_from_statistics,
     compute_score_floor_statistics,
 )
@@ -236,6 +237,7 @@ def empty_hough_payload(*, score_floor_result: ScoreFloorResult) -> HoughFiltere
         "lines_used": [],
         # Add the lines_for_filtering field to the surrounding dictionary so it appears in outputs or returned metadata.
         "lines_for_filtering": [],
+        "hough_skipped_reason": "empty_pre_hough_mask",
         # Add the column_assignment field to the surrounding dictionary so it appears in outputs or returned metadata.
         "column_assignment": {
             # Add the mapped_y field to the surrounding dictionary so it appears in outputs or returned metadata.
@@ -249,7 +251,14 @@ def empty_hough_payload(*, score_floor_result: ScoreFloorResult) -> HoughFiltere
         # Pass the hough_context argument into the surrounding call so the callee receives that setting explicitly.
         hough_context=context,
         # Pass the detection_result argument into the surrounding call so the callee receives that setting explicitly.
-        detection_result={"raw_lines": [], "candidate_segments": [], "threshold_start": score_floor_result.score_floor},
+        detection_result={
+            "raw_lines": [],
+            "candidate_segments": [],
+            "threshold_start": score_floor_result.score_floor,
+            "hough_skipped_reason": "empty_pre_hough_mask",
+            "skimage_raw_line_count_before_direction_filter": 0,
+            "direction_rejected_line_count": 0,
+        },
         # Pass the filtered_result argument into the surrounding call so the callee receives that setting explicitly.
         filtered_result=filtered,
         # Pass the raw_line_count argument into the surrounding call so the callee receives that setting explicitly.
@@ -354,6 +363,8 @@ def build_result_row(
         "ref_to_ref_column_count": int(ref_to_ref_shape[1]),
         # Add the score_floor_alpha field to the surrounding dictionary so it appears in outputs or returned metadata.
         "score_floor_alpha": float(config.score_floor_alpha),
+        "pre_hough_mask_kind": pre_hough_mask_kind(config),
+        "minimum_pre_hough_levenshtein": config.minimum_pre_hough_levenshtein,
         # Add the score_mean_ref_to_pred field to the surrounding dictionary so it appears in outputs or returned metadata.
         "score_mean_ref_to_pred": ref_to_pred_floor.score_mean,
         # Add the score_standard_deviation_ref_to_pred field to the surrounding dictionary so it appears in outputs or returned metadata.
@@ -386,6 +397,17 @@ def build_result_row(
         "align_min_iou_threshold": float(config.align_min_iou_threshold),
         # Add the min_surviving_line_nls field to the surrounding dictionary so it appears in outputs or returned metadata.
         "min_surviving_line_nls": config.min_surviving_line_nls,
+        "hough_skip_reason_ref_to_pred": str(ref_to_pred_hough.detection_result.get("hough_skipped_reason", "")),
+        "hough_skip_reason_ref_to_ref": (
+            str(ref_to_ref_hough.detection_result.get("hough_skipped_reason", ""))
+            if ref_to_ref_hough is not None
+            else (
+                "empty_ref_to_ref_pre_hough_mask"
+                if bool(scored.ref_to_pred_payload.hough_payload.filtered_result.get("lines_used"))
+                and int(ref_to_ref_floor.active_cell_count) <= 0
+                else "no_ref_to_pred_lines_after_filter"
+            )
+        ),
         # Add the raw_line_count field to the surrounding dictionary so it appears in outputs or returned metadata.
         "raw_line_count": int(ref_to_pred_hough.raw_line_count),
         # Add the candidate_line_count field to the surrounding dictionary so it appears in outputs or returned metadata.
@@ -449,9 +471,25 @@ class AlphaCandidateRun:
     timing_total_seconds: float
 
 
+def fixed_minimum_levenshtein_mask_enabled(config: PipelineConfig) -> bool:
+    """Return True when the user requested a fixed Levenshtein pre-Hough mask."""
+
+    return config.minimum_pre_hough_levenshtein is not None
+
+
+def pre_hough_mask_kind(config: PipelineConfig) -> str:
+    """Return the public name of the mask-building rule used by this run."""
+
+    if fixed_minimum_levenshtein_mask_enabled(config):
+        return "minimum_levenshtein"
+    return "score_mean_plus_alpha_standard_deviation"
+
+
 def alpha_values_for_config(config: PipelineConfig) -> tuple[float, ...]:
     """Return the alpha candidates for this run, including the configured upper bound."""
 
+    if fixed_minimum_levenshtein_mask_enabled(config):
+        return (0.0,)
     if not bool(config.alpha_sweep_enabled):
         return (round(float(config.score_floor_alpha), 10),)
 
@@ -588,6 +626,7 @@ def hough_summary(
         "raw_lines": list(hough_payload.detection_result.get("raw_lines", [])),
         "candidate_lines_for_filtering": list(filtered_result.get("lines_for_filtering", [])),
         "final_lines": list(final_lines_after_text_filter if final_lines_after_text_filter is not None else filtered_result.get("lines_used", [])),
+        "hough_skipped_reason": str(hough_payload.detection_result.get("hough_skipped_reason", "")),
     }
 
 
@@ -672,6 +711,28 @@ def build_alpha_candidate_summary(candidate: AlphaCandidateRun) -> dict[str, Any
     }
 
 
+def build_pre_hough_mask_result(
+    *,
+    score_matrix: np.ndarray,
+    statistics: ScoreFloorStatistics,
+    config: PipelineConfig,
+    alpha: float,
+) -> ScoreFloorResult:
+    """Build the mask selected by the current preprocessing configuration."""
+
+    if fixed_minimum_levenshtein_mask_enabled(config):
+        return compute_minimum_levenshtein_mask(
+            score_matrix,
+            minimum_levenshtein=float(config.minimum_pre_hough_levenshtein),
+            statistics=statistics,
+        )
+    return compute_score_floor_mask_from_statistics(
+        score_matrix,
+        alpha=float(alpha),
+        statistics=statistics,
+    )
+
+
 def run_alpha_candidate(
     *,
     document: RunfileDocument,
@@ -696,15 +757,17 @@ def run_alpha_candidate(
     candidate_started_at = time.perf_counter()
     candidate_config = replace(config, score_floor_alpha=float(alpha))
     preprocessing_started_at = time.perf_counter()
-    ref_to_pred_floor = compute_score_floor_mask_from_statistics(
-        ref_to_pred_matrix,
-        alpha=float(alpha),
+    ref_to_pred_floor = build_pre_hough_mask_result(
+        score_matrix=ref_to_pred_matrix,
         statistics=ref_to_pred_floor_statistics,
-    )
-    ref_to_ref_floor = compute_score_floor_mask_from_statistics(
-        ref_to_ref_matrix,
+        config=candidate_config,
         alpha=float(alpha),
+    )
+    ref_to_ref_floor = build_pre_hough_mask_result(
+        score_matrix=ref_to_ref_matrix,
         statistics=ref_to_ref_floor_statistics,
+        config=candidate_config,
+        alpha=float(alpha),
     )
     timing_preprocessing_seconds = time.perf_counter() - preprocessing_started_at
 
@@ -974,9 +1037,15 @@ def process_one_document(
         )
 
         alpha_values = alpha_values_for_config(config)
+        if fixed_minimum_levenshtein_mask_enabled(config):
+            log(
+                f"[pre-hough] {document.fname} fixed minimum Levenshtein mask enabled "
+                f"minimum={float(config.minimum_pre_hough_levenshtein):.6g} "
+                f"alpha_sweep_skipped=True"
+            )
         log(
             f"[alpha-sweep] {document.fname} start "
-            f"enabled={bool(config.alpha_sweep_enabled)} "
+            f"enabled={bool(config.alpha_sweep_enabled) and not fixed_minimum_levenshtein_mask_enabled(config)} "
             f"candidate_count={len(alpha_values)} "
             f"values={','.join(f'{value:.6g}' for value in alpha_values)}"
         )
@@ -1037,7 +1106,7 @@ def process_one_document(
         timing_total_seconds = time.perf_counter() - document_started_at
         selected_result_row["timing_total_seconds"] = float(timing_total_seconds)
         alpha_sweep_pickle_path: str | None = None
-        if bool(config.alpha_sweep_enabled):
+        if bool(config.alpha_sweep_enabled) and not fixed_minimum_levenshtein_mask_enabled(config):
             pickle_path = alpha_sweep_pickle_path_for_document(config, document)
             alpha_sweep_pickle_path = str(pickle_path)
             selected_result_row["alpha_sweep_pickle_path"] = alpha_sweep_pickle_path
@@ -1058,7 +1127,7 @@ def process_one_document(
         else:
             log(f"[plot] {document.fname} payload skipped reason=plotting_disabled")
 
-        if bool(config.alpha_sweep_enabled):
+        if bool(config.alpha_sweep_enabled) and not fixed_minimum_levenshtein_mask_enabled(config):
             pickle_payload = build_alpha_sweep_pickle_payload(
                 document=document,
                 config=config,
@@ -1074,13 +1143,23 @@ def process_one_document(
             write_pickle_atomically(Path(alpha_sweep_pickle_path), pickle_payload)
             log(f"[alpha-sweep] {document.fname} wrote pickle {alpha_sweep_pickle_path}")
 
-        log(
-            f"[alpha-sweep] {document.fname} selected "
-            f"alpha={float(selected_result_row.get('score_floor_alpha')):.6f} "
-            f"score={format_log_value(selected_result_row.get('selection_harmonic_score'))} "
-            f"used_lines={int(selected_result_row.get('used_line_count') or 0)} "
-            f"seconds={format_log_value(timing_total_seconds)}"
-        )
+        if fixed_minimum_levenshtein_mask_enabled(config):
+            log(
+                f"[pre-hough] {document.fname} selected fixed minimum Levenshtein mask "
+                f"minimum={float(config.minimum_pre_hough_levenshtein):.6g} "
+                f"threshold_ref_to_pred={format_log_value(selected_result_row.get('score_floor_ref_to_pred'))} "
+                f"score={format_log_value(selected_result_row.get('selection_harmonic_score'))} "
+                f"used_lines={int(selected_result_row.get('used_line_count') or 0)} "
+                f"seconds={format_log_value(timing_total_seconds)}"
+            )
+        else:
+            log(
+                f"[alpha-sweep] {document.fname} selected "
+                f"alpha={float(selected_result_row.get('score_floor_alpha')):.6f} "
+                f"score={format_log_value(selected_result_row.get('selection_harmonic_score'))} "
+                f"used_lines={int(selected_result_row.get('used_line_count') or 0)} "
+                f"seconds={format_log_value(timing_total_seconds)}"
+            )
         return DocumentRunResult(
             result_row=selected_result_row,
             skipped_row=None,

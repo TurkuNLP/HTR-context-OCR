@@ -36,6 +36,8 @@ DOCUMENT_RESULT_FIELDNAMES = [
     "ref_to_ref_column_count",
     # Provide this literal text value to the surrounding path, message, or argument definition.
     "score_floor_alpha",
+    "pre_hough_mask_kind",
+    "minimum_pre_hough_levenshtein",
     # Provide this literal text value to the surrounding path, message, or argument definition.
     "selection_harmonic_score",
     # Provide this literal text value to the surrounding path, message, or argument definition.
@@ -72,6 +74,8 @@ DOCUMENT_RESULT_FIELDNAMES = [
     "align_min_iou_threshold",
     # Provide this literal text value to the surrounding path, message, or argument definition.
     "min_surviving_line_nls",
+    "hough_skip_reason_ref_to_pred",
+    "hough_skip_reason_ref_to_ref",
     # Provide this literal text value to the surrounding path, message, or argument definition.
     "raw_line_count",
     # Provide this literal text value to the surrounding path, message, or argument definition.

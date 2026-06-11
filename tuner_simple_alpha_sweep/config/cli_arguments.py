@@ -46,6 +46,7 @@ def build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--alpha-sweep-min", type=float, default=1.0)
     parser.add_argument("--alpha-sweep-max", type=float, default=4.0)
     parser.add_argument("--alpha-sweep-step", type=float, default=0.2)
+    parser.add_argument("--minimum-pre-hough-levenshtein", type=float, default=None)
     parser.add_argument("--hough-threshold", type=int, default=25)
     parser.add_argument("--hough-line-length", type=int, default=35)
     parser.add_argument("--hough-line-gap", type=int, default=15)
@@ -89,6 +90,7 @@ def parse_pipeline_config(argv: list[str] | None = None) -> PipelineConfig:
         alpha_sweep_min=float(args.alpha_sweep_min),
         alpha_sweep_max=float(args.alpha_sweep_max),
         alpha_sweep_step=float(args.alpha_sweep_step),
+        minimum_pre_hough_levenshtein=None if args.minimum_pre_hough_levenshtein is None else float(args.minimum_pre_hough_levenshtein),
         hough_parameters=ProbabilisticHoughParameters(
             hough_threshold=int(args.hough_threshold),
             hough_line_length=int(args.hough_line_length),

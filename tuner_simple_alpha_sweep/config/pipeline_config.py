@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 """Configuration dataclasses shared by the simple tuner runners."""
 
 from dataclasses import dataclass, field
@@ -53,6 +54,8 @@ class PipelineConfig:
     alpha_sweep_max: float = 4.0
     # The alpha increment between neighboring sweep candidates.
     alpha_sweep_step: float = 0.2
+    # When set, this fixed Levenshtein cutoff builds one pre-Hough mask and skips alpha sweep.
+    minimum_pre_hough_levenshtein: float | None = None
     # The Hough parameters control the exact probabilistic Hough call used for every document.
     hough_parameters: ProbabilisticHoughParameters = field(default_factory=lambda: ProbabilisticHoughParameters(25, 35, 15, 1))
     # The intersection-over-union threshold decides when a detected line covers a text window.
@@ -91,6 +94,10 @@ class PipelineConfig:
             raise ValueError("--minimum-matrix-columns must be zero or positive")
         if float(self.score_floor_alpha) < 0.0:
             raise ValueError("--score-floor-alpha must be zero or positive")
+        if self.minimum_pre_hough_levenshtein is not None:
+            minimum_levenshtein = float(self.minimum_pre_hough_levenshtein)
+            if not math.isfinite(minimum_levenshtein) or minimum_levenshtein < 0.0:
+                raise ValueError("--minimum-pre-hough-levenshtein must be finite and zero or positive")
         if bool(self.alpha_sweep_enabled):
             if float(self.alpha_sweep_min) < 0.0:
                 raise ValueError("--alpha-sweep-min must be zero or positive")

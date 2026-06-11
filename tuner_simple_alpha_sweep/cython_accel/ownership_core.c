@@ -9,7 +9,7 @@
         ],
         "name": "cython_accel.ownership_core",
         "sources": [
-            "/scratch/project_2017385/dorian/HTR-context-OCR/tuner_simple_alpha_sweep/cython_accel/ownership_core.pyx"
+            "/scratch/project_2017385/dorian/Churro_copy/tuner_simple_alpha_sweep/cython_accel/ownership_core.pyx"
         ]
     },
     "module_name": "cython_accel.ownership_core"

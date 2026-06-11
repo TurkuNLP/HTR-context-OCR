@@ -1,0 +1,2 @@
+main_language,document_type,runfile_document_count,loadable_document_count,loaded_document_count,skipped_document_count,mean_document_normalised_levenshtein,mean_weighted_along_lines_normalised_levenshtein,mean_correct_ref_coverage,mean_missing_ref_coverage,mean_repetition_on_reference,mean_hallucination
+Czech,print,1,1,1,0,0.9355488419,0.8022526316,0.9846311475,0.0000000000,0.0153688525,0.0332326284
