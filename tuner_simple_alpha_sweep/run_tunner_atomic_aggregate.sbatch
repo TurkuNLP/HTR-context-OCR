@@ -19,5 +19,21 @@ if type module >/dev/null 2>&1; then
 fi
 
 SCRIPT_SOURCE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-TUNER_SIMPLE_DIR="${TUNER_SIMPLE_DIR:-${SCRIPT_SOURCE_DIR}}"
-python3 "${TUNER_SIMPLE_DIR}/aggregate_dynamic_outputs.py" "$@"
+DEFAULT_TUNER_SIMPLE_DIR="/scratch/project_2017385/dorian/HTR-context-OCR/tuner_simple_alpha_sweep"
+
+if [[ -n "${TUNER_SIMPLE_DIR:-}" && -f "${TUNER_SIMPLE_DIR}/aggregate_dynamic_outputs.py" ]]; then
+  RESOLVED_TUNER_SIMPLE_DIR="$(cd "${TUNER_SIMPLE_DIR}" && pwd)"
+elif [[ -f "${SCRIPT_SOURCE_DIR}/aggregate_dynamic_outputs.py" ]]; then
+  RESOLVED_TUNER_SIMPLE_DIR="${SCRIPT_SOURCE_DIR}"
+elif [[ -f "${DEFAULT_TUNER_SIMPLE_DIR}/aggregate_dynamic_outputs.py" ]]; then
+  RESOLVED_TUNER_SIMPLE_DIR="${DEFAULT_TUNER_SIMPLE_DIR}"
+else
+  echo "[error] Could not locate aggregate_dynamic_outputs.py for tuner_simple_alpha_sweep." >&2
+  echo "[error] TUNER_SIMPLE_DIR=${TUNER_SIMPLE_DIR:-}" >&2
+  echo "[error] SCRIPT_SOURCE_DIR=${SCRIPT_SOURCE_DIR}" >&2
+  echo "[error] DEFAULT_TUNER_SIMPLE_DIR=${DEFAULT_TUNER_SIMPLE_DIR}" >&2
+  exit 2
+fi
+
+echo "[aggregate] tuner_simple_alpha_sweep_dir=${RESOLVED_TUNER_SIMPLE_DIR}"
+python3 "${RESOLVED_TUNER_SIMPLE_DIR}/aggregate_dynamic_outputs.py" "$@"
