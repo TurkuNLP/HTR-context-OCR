@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-#SBATCH --job-name=tuner_simple_worker
+#SBATCH --job-name=tuner_simple_alpha_worker
 #SBATCH --account=project_2017385
 #SBATCH --partition=medium
 #SBATCH --time=01:30:00
@@ -7,9 +7,9 @@
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=24G
-#SBATCH --chdir=/scratch/project_2017385/dorian/Churro_copy
-#SBATCH --output=logs/tuner_simple_worker_%j.out
-#SBATCH --error=logs/tuner_simple_worker_%j.err
+#SBATCH --chdir=/scratch/project_2017385/dorian/HTR-context-OCR
+#SBATCH --output=logs/tuner_simple_alpha_worker_%j.out
+#SBATCH --error=logs/tuner_simple_alpha_worker_%j.err
 set -euo pipefail
 
 if type module >/dev/null 2>&1; then
@@ -23,5 +23,6 @@ export OPENBLAS_NUM_THREADS="${OPENBLAS_NUM_THREADS:-1}"
 export MKL_NUM_THREADS="${MKL_NUM_THREADS:-1}"
 export NUMEXPR_NUM_THREADS="${NUMEXPR_NUM_THREADS:-1}"
 
-TUNER_SIMPLE_DIR="${TUNER_SIMPLE_DIR:-/scratch/project_2017385/dorian/Churro_copy/tuner_simple}"
+SCRIPT_SOURCE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+TUNER_SIMPLE_DIR="${TUNER_SIMPLE_DIR:-${SCRIPT_SOURCE_DIR}}"
 python3 "${TUNER_SIMPLE_DIR}/run_tuner_simple.py" "$@"
