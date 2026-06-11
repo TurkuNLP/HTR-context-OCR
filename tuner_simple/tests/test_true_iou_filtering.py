@@ -29,14 +29,12 @@ def test_align_min_iou_threshold_controls_true_iou_merging() -> None:
         score_matrix=matrix,
         detection_result=detection_result,
         hough_input_mask=np.ones((20, 20), dtype=bool),
-        align_abs_min_len=0.0,
         align_min_iou_threshold=0.035,
     )
     strict_result = filter_lines_by_column_ownership(
         score_matrix=matrix,
         detection_result=detection_result,
         hough_input_mask=np.ones((20, 20), dtype=bool),
-        align_abs_min_len=0.0,
         align_min_iou_threshold=0.4,
     )
 

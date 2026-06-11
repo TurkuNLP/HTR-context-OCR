@@ -44,7 +44,6 @@ def build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--hough-line-length", type=int, default=35)
     parser.add_argument("--hough-line-gap", type=int, default=15)
     parser.add_argument("--hough-seed", type=int, default=1)
-    parser.add_argument("--align-abs-min-len", type=float, default=0.0)
     parser.add_argument("--align-min-iou-threshold", type=float, default=0.035)
     parser.add_argument("--min-surviving-line-nls", type=float, default=0.5)
     parser.add_argument("--plot-mode", choices=sorted(VALID_PLOT_MODES), default="stitched-language")
@@ -86,7 +85,6 @@ def parse_pipeline_config(argv: list[str] | None = None) -> PipelineConfig:
             hough_line_gap=int(args.hough_line_gap),
             hough_seed=int(args.hough_seed),
         ),
-        align_abs_min_len=float(args.align_abs_min_len),
         align_min_iou_threshold=float(args.align_min_iou_threshold),
         min_surviving_line_nls=min_line_nls,
         plot_mode=str(args.plot_mode),

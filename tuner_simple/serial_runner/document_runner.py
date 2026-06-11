@@ -616,8 +616,6 @@ def process_one_document(
                 hough_line_gap=hough.hough_line_gap,
                 # Pass the hough_seed argument into the surrounding call so the callee receives that setting explicitly.
                 hough_seed=hough.hough_seed,
-                # Pass align_abs_min_len into the surrounding call; this supplies the absolute line-length filter passed into the existing line filtering code.
-                align_abs_min_len=config.align_abs_min_len,
                 # Pass align_min_iou_threshold into the surrounding call; this supplies the overlap threshold used when assigning line coverage to text windows.
                 align_min_iou_threshold=config.align_min_iou_threshold,
             )
@@ -703,8 +701,6 @@ def process_one_document(
                 hough_line_gap=hough.hough_line_gap,
                 # Pass the hough_seed argument into the surrounding call so the callee receives that setting explicitly.
                 hough_seed=hough.hough_seed,
-                # Pass align_abs_min_len into the surrounding call; this supplies the absolute line-length filter passed into the existing line filtering code.
-                align_abs_min_len=config.align_abs_min_len,
                 # Pass align_min_iou_threshold into the surrounding call; this supplies the overlap threshold used when assigning line coverage to text windows.
                 align_min_iou_threshold=config.align_min_iou_threshold,
             )

@@ -205,7 +205,6 @@ def filter_lines_by_column_ownership(
     score_matrix: np.ndarray,
     detection_result: dict,
     hough_input_mask: np.ndarray,
-    align_abs_min_len: float,
     align_min_iou_threshold: float,
 ) -> dict:
     """Run the v2.2 true-IoU ownership filter on raw Hough segments."""
@@ -233,7 +232,6 @@ def filter_lines_by_column_ownership(
         lines_for_filtering,
         matrix,
         mask_bool,
-        abs_min_len=float(align_abs_min_len),
         min_iou_threshold=float(align_min_iou_threshold),
     )
 
@@ -256,7 +254,6 @@ def run_probabilistic_hough_and_filter(
     hough_line_length: int,
     hough_line_gap: int,
     hough_seed: int,
-    align_abs_min_len: float,
     align_min_iou_threshold: float,
 ) -> HoughFilteredPayload:
     """Run local Hough detection and v2.2 true-IoU filtering once."""
@@ -277,7 +274,6 @@ def run_probabilistic_hough_and_filter(
         score_matrix=np.asarray(score_matrix, dtype=float),
         detection_result=detection_result,
         hough_input_mask=np.asarray(hough_input_mask, dtype=bool),
-        align_abs_min_len=float(align_abs_min_len),
         align_min_iou_threshold=float(align_min_iou_threshold),
     )
     filter_seconds = time.perf_counter() - filter_started_at

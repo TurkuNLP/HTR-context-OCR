@@ -47,8 +47,6 @@ class PipelineConfig:
     score_floor_alpha: float = 1.0
     # The Hough parameters control the exact probabilistic Hough call used for every document.
     hough_parameters: ProbabilisticHoughParameters = field(default_factory=lambda: ProbabilisticHoughParameters(25, 35, 15, 1))
-    # The absolute line-length filter is kept for compatibility with the existing filtering code.
-    align_abs_min_len: float = 0.0
     # The intersection-over-union threshold decides when a detected line covers a text window.
     align_min_iou_threshold: float = 0.035
     # The line-level normalised Levenshtein filter removes detected lines with weak text support.

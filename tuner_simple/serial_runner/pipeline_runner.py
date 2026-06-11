@@ -57,7 +57,6 @@ def run_simple_tuner(config: PipelineConfig, *, log) -> dict[str, Any]:
         f"line_length={int(config.hough_parameters.hough_line_length)} "
         f"line_gap={int(config.hough_parameters.hough_line_gap)} "
         f"seed={int(config.hough_parameters.hough_seed)} "
-        f"align_abs_min_len={float(config.align_abs_min_len):.6f} "
         f"align_min_iou_threshold={float(config.align_min_iou_threshold):.6f} "
         f"min_surviving_line_nls={config.min_surviving_line_nls}"
     )
@@ -256,8 +255,6 @@ def run_simple_tuner(config: PipelineConfig, *, log) -> dict[str, Any]:
         "minimum_matrix_rows": int(config.minimum_matrix_rows),
         # Add the minimum_matrix_columns field to the surrounding dictionary so it appears in outputs or returned metadata.
         "minimum_matrix_columns": int(config.minimum_matrix_columns),
-        # Add the align_abs_min_len field to the surrounding dictionary so it appears in outputs or returned metadata.
-        "align_abs_min_len": float(config.align_abs_min_len),
         # Add the align_min_iou_threshold field to the surrounding dictionary so it appears in outputs or returned metadata.
         "align_min_iou_threshold": float(config.align_min_iou_threshold),
         # Add the min_surviving_line_nls field to the surrounding dictionary so it appears in outputs or returned metadata.

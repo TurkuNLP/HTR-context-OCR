@@ -50,7 +50,6 @@ Hough and filtering options:
   --hough-line-length <n>                Minimum accepted probabilistic Hough line length
   --hough-line-gap <n>                   Maximum gap allowed inside a probabilistic Hough line
   --hough-seed <n>                       Integer seed passed to probabilistic Hough for reproducible lines
-  --align-abs-min-len <value>            Absolute line-length filter used by the line filtering stage
   --align-min-iou-threshold <value>      Minimum overlap threshold used when assigning windows to lines
   --min-surviving-line-nls <value>       Minimum line-level normalised Levenshtein similarity; <=0 disables it
 
@@ -68,7 +67,7 @@ PYTHON_SCRIPT, RUNFILE_JSON, OUTPUT_DIR, SCORES_PKL_REF_TO_PRED,
 SCORES_PKL_REF_TO_REF, MAX_ITEMS, WINDOW_SIZE, WINDOW_STRIDE,
 MINIMUM_MATRIX_ROWS, MINIMUM_MATRIX_COLUMNS, SCORE_FLOOR_ALPHA,
 HOUGH_THRESHOLD, HOUGH_LINE_LENGTH, HOUGH_LINE_GAP, HOUGH_SEED,
-ALIGN_ABS_MIN_LEN, ALIGN_MIN_IOU_THRESHOLD, MIN_SURVIVING_LINE_NLS, PLOT_MODE, STITCHED_PANEL_COLUMNS, SAVED_FIGURE_DPI
+ALIGN_MIN_IOU_THRESHOLD, MIN_SURVIVING_LINE_NLS, PLOT_MODE, STITCHED_PANEL_COLUMNS, SAVED_FIGURE_DPI
 USAGE
 }
 
@@ -227,8 +226,6 @@ append_env_default "--hough-line-length" "HOUGH_LINE_LENGTH"
 append_env_default "--hough-line-gap" "HOUGH_LINE_GAP"
 # Add Hough seed defaults from the environment when requested.
 append_env_default "--hough-seed" "HOUGH_SEED"
-# Add absolute line-length filter defaults from the environment when requested.
-append_env_default "--align-abs-min-len" "ALIGN_ABS_MIN_LEN"
 # Add line-overlap threshold defaults from the environment when requested.
 append_env_default "--align-min-iou-threshold" "ALIGN_MIN_IOU_THRESHOLD"
 # Add line-level similarity filter defaults from the environment when requested.

@@ -1,0 +1,2 @@
+main_language,document_type,runfile_document_count,loadable_document_count,loaded_document_count,skipped_document_count,mean_document_normalised_levenshtein,mean_weighted_along_lines_normalised_levenshtein,mean_correct_ref_coverage,mean_missing_ref_coverage,mean_repetition_on_reference,mean_hallucination
+Arabic,handwriting,1,1,1,0,0.8969696970,0.8548148148,1.0000000000,0.0000000000,0.0000000000,0.0273556231
