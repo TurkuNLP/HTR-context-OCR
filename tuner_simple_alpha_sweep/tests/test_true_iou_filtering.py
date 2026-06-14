@@ -60,3 +60,25 @@ def test_true_iou_decision_uses_minimum_of_prediction_and_reference_iou() -> Non
     assert coverage_b is not None
     assert coverages_merge_candidate(coverage_a, coverage_b, min_iou_threshold=0.035)
     assert not coverages_merge_candidate(coverage_a, coverage_b, min_iou_threshold=0.4)
+
+
+def test_final_line_sorting_remaps_column_assignment_ids() -> None:
+    from tuner_simple_alpha_sweep.filtering.filter_final_assignment import sort_final_lines_and_remap_assignment
+
+    unsorted_lines = [
+        {"x0": 12.0, "y0": 1.0, "x1": 17.0, "y1": 6.0, "anchor_y": 3.5},
+        {"x0": 0.0, "y0": 0.0, "x1": 7.0, "y1": 7.0, "anchor_y": 0.0},
+    ]
+    assignment = {
+        "mapped_y": np.asarray([0.0, 1.0, 2.0, 3.0, np.nan], dtype=float),
+        "mapped_line_id": np.asarray([1, 1, 0, 0, -1], dtype=int),
+    }
+
+    sorted_lines, remapped_assignment = sort_final_lines_and_remap_assignment(unsorted_lines, assignment)
+
+    assert sorted_lines[0]["x0"] == 0.0
+    assert sorted_lines[1]["x0"] == 12.0
+    np.testing.assert_array_equal(
+        remapped_assignment["mapped_line_id"],
+        np.asarray([0, 0, 1, 1, -1], dtype=int),
+    )

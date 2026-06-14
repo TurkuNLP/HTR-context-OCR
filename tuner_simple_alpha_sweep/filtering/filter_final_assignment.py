@@ -132,6 +132,42 @@ def used_coverage_indices_from_assignment(
     ]
 
 
+def final_line_sort_key(line: dict) -> tuple[float, float]:
+    """Return the visible reading-order key used for final line output."""
+    return (
+        float(line.get("anchor_y", min(line["y0"], line["y1"]))),
+        min(float(line["x0"]), float(line["x1"])),
+    )
+
+
+def sort_final_lines_and_remap_assignment(
+    final_lines: list[dict],
+    assignment: dict[str, np.ndarray],
+) -> tuple[list[dict], dict[str, np.ndarray]]:
+    """Sort final lines and keep column-owner ids aligned with that sorted order.
+
+    ``compute_final_assignment`` stores line ids as positions in the coverage list
+    used during ownership assignment.  Once final lines are sorted for plotting
+    and reading order, those ids must be rewritten so downstream text scoring
+    still compares each line with the columns it actually owns.
+    """
+    indexed_lines = [(int(line_id), dict(line)) for line_id, line in enumerate(final_lines)]
+    sorted_indexed_lines = sorted(indexed_lines, key=lambda item: final_line_sort_key(item[1]))
+    old_line_id_to_new_line_id = {
+        int(old_line_id): int(new_line_id)
+        for new_line_id, (old_line_id, _line) in enumerate(sorted_indexed_lines)
+    }
+
+    original_mapped_line_id = np.asarray(assignment.get("mapped_line_id", []), dtype=int)
+    remapped_line_id = np.full(original_mapped_line_id.shape, -1, dtype=int)
+    for old_line_id, new_line_id in old_line_id_to_new_line_id.items():
+        remapped_line_id[original_mapped_line_id == int(old_line_id)] = int(new_line_id)
+
+    remapped_assignment = dict(assignment)
+    remapped_assignment["mapped_line_id"] = remapped_line_id
+    return [line for _old_line_id, line in sorted_indexed_lines], remapped_assignment
+
+
 def finalize_outputs(
     coverages: list[dict],
     matrix: np.ndarray,
@@ -231,13 +267,7 @@ def finalize_outputs(
         )
         final_lines.append(final_line)
 
-    final_lines = sorted(
-        final_lines,
-        key=lambda line: (
-            float(line.get("anchor_y", min(line["y0"], line["y1"]))),
-            min(line["x0"], line["x1"]),
-        ),
-    )
+    final_lines, assignment = sort_final_lines_and_remap_assignment(final_lines, assignment)
     set_profile_count(profile, "filter_finalize_prune_iteration_count", prune_iteration_count)
     set_profile_count(profile, "filter_final_line_count", len(final_lines))
     return final_lines, assignment
@@ -247,6 +277,8 @@ __all__ = [
     "build_coverage_indices_by_prediction_column",
     "compute_final_assignment",
     "empty_assignment",
+    "final_line_sort_key",
     "finalize_outputs",
+    "sort_final_lines_and_remap_assignment",
     "used_coverage_indices_from_assignment",
 ]
