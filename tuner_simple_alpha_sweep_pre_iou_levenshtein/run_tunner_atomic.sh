@@ -43,8 +43,9 @@ Important tuner options passed through to each worker:
   --alpha-sweep-max <value>
   --alpha-sweep-step <value>
   --minimum-pre-hough-levenshtein <v>  Build one fixed Levenshtein pre-Hough mask and skip alpha sweep; 0.30 and 30.0 are equivalent
-  --harmonic-mode <value>             Alpha candidate scoring formula: balanced (default), coverage-hallucination-priority, or coverage-hallucination-only
+  --harmonic-mode <value>             Alpha candidate scoring formula: balanced (default), coverage-hallucination-priority, coverage-hallucination-only, or nls-priority
                                       Results are written to <output-dir>/<harmonic-mode>/ automatically
+  --hough-num-runs <n>                Number of independent ref-to-pred Hough runs per candidate; union of outputs feeds filtering (default 1)
   --hough-threshold <n>
   --hough-line-length <n>
   --hough-line-gap <n>

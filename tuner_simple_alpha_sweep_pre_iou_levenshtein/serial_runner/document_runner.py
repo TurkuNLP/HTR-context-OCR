@@ -10,6 +10,8 @@ import pickle
 import time
 from typing import Any
 
+import json
+
 import numpy as np
 
 from tuner_simple_alpha_sweep_pre_iou_levenshtein.config.pipeline_config import PipelineConfig
@@ -42,6 +44,34 @@ from tuner_simple_alpha_sweep_pre_iou_levenshtein.scoring.levenshtein import nor
 from tuner_simple_alpha_sweep_pre_iou_levenshtein.scoring.line_text_similarity import filter_lines_by_minimum_normalised_levenshtein
 from tuner_simple_alpha_sweep_pre_iou_levenshtein.scoring.scoring_pipeline import ScoredDocumentResult, score_document_alignment, zero_alignment_metrics
 from tuner_simple_alpha_sweep_pre_iou_levenshtein.scoring.scoring_pipeline import DocumentAlignmentMetrics
+
+
+def _serialise_per_run_counts(detection_result: dict) -> str:
+    """Return the per-run raw falling-line counts as a compact JSON array."""
+    counts = detection_result.get("hough_per_run_raw_counts", [])
+    return json.dumps(counts)
+
+
+def _serialise_segment_hit_counts(detection_result: dict) -> str:
+    """Return a JSON array describing how many runs detected each union segment.
+
+    Each element is {"x0": ..., "y0": ..., "x1": ..., "y1": ...,
+                     "hit_count": N, "miss_count": M}
+    sorted by (x0, y0, x1, y1) so the upper-left-most segment is first.
+    M = hough_num_runs - hit_count, i.e. the number of runs where the
+    segment was absent entirely.
+    """
+    hit_counts: dict = detection_result.get("hough_segment_run_hit_counts", {})
+    num_runs: int = int(detection_result.get("hough_num_runs", 1))
+    records = []
+    for seg, hit in sorted(hit_counts.items()):
+        (x0, y0), (x1, y1) = seg
+        records.append({
+            "x0": x0, "y0": y0, "x1": x1, "y1": y1,
+            "hit_count": hit,
+            "miss_count": num_runs - hit,
+        })
+    return json.dumps(records)
 
 
 # Ask Python to generate common data-container methods for the class defined next.
@@ -394,7 +424,7 @@ def build_result_row(
         # Add the hough_line_gap field to the surrounding dictionary so it appears in outputs or returned metadata.
         "hough_line_gap": int(hough.hough_line_gap),
         # Add the hough_seed field to the surrounding dictionary so it appears in outputs or returned metadata.
-        "hough_seed": int(hough.hough_seed),
+        "hough_seed": None if hough.hough_seed is None else int(hough.hough_seed),
         # Add the align_min_iou_threshold field to the surrounding dictionary so it appears in outputs or returned metadata.
         "align_min_iou_threshold": float(config.align_min_iou_threshold),
         # Add the min_surviving_line_nls field to the surrounding dictionary so it appears in outputs or returned metadata.
@@ -409,6 +439,10 @@ def build_result_row(
         "pre_iou_line_levenshtein_max": ref_to_pred_hough.detection_result.get("pre_iou_line_levenshtein_max"),
         "pre_iou_line_levenshtein_mean": ref_to_pred_hough.detection_result.get("pre_iou_line_levenshtein_mean"),
         "pre_iou_line_levenshtein_seconds": float(ref_to_pred_hough.detection_result.get("pre_iou_line_levenshtein_seconds", 0.0)),
+        "hough_num_runs": int(ref_to_pred_hough.detection_result.get("hough_num_runs", 1)),
+        "hough_union_unique_segment_count": int(ref_to_pred_hough.detection_result.get("hough_union_unique_segment_count", ref_to_pred_hough.raw_line_count)),
+        "hough_per_run_counts_json": _serialise_per_run_counts(ref_to_pred_hough.detection_result),
+        "hough_segment_run_hit_counts_json": _serialise_segment_hit_counts(ref_to_pred_hough.detection_result),
         "hough_skip_reason_ref_to_pred": str(ref_to_pred_hough.detection_result.get("hough_skipped_reason", "")),
         "hough_skip_reason_ref_to_ref": (
             str(ref_to_ref_hough.detection_result.get("hough_skipped_reason", ""))
@@ -542,6 +576,10 @@ def harmonic_selection_score(metrics: DocumentAlignmentMetrics, *, mode: str = "
             non-hallucination alone.
             Formula: 2 / (1/coverage + 1/(1-hallucination))
 
+        nls-priority
+            NLS carries twice the weight of coverage and non-hallucination.
+            Formula: 4 / (2/NLS + 1/coverage + 1/(1-hallucination))
+
     Returns 0.0 when any required metric is missing, non-finite, or not strictly positive.
     """
 
@@ -574,6 +612,10 @@ def harmonic_selection_score(metrics: DocumentAlignmentMetrics, *, mode: str = "
     if mode == "coverage-hallucination-priority":
         # NLS carries weight 1; coverage and non-hallucination each carry weight 2.
         return float(5.0 / (1.0 / nls + 2.0 / coverage + 2.0 / non_hallucination))
+
+    if mode == "nls-priority":
+        # NLS carries weight 2; coverage and non-hallucination each carry weight 1.
+        return float(4.0 / (2.0 / nls + 1.0 / coverage + 1.0 / non_hallucination))
 
     # Default: "balanced" — all three terms carry equal weight.
     return float(3.0 / (1.0 / nls + 1.0 / coverage + 1.0 / non_hallucination))
@@ -830,6 +872,12 @@ def run_alpha_candidate(
     timing_preprocessing_seconds = time.perf_counter() - preprocessing_started_at
 
     hough = candidate_config.hough_parameters
+    # Derive the number of characters shared between adjacent sliding windows.
+    # With window_size=50 and window_stride=35 this is 15.  Both the pre-IoU
+    # Hough-segment NLS filter and the post-IoU line NLS filter need this value
+    # so that consecutive windows contribute only their unique characters to the
+    # concatenated text strings used for Levenshtein comparison.
+    window_overlap = max(0, int(candidate_config.window_size) - int(candidate_config.window_stride))
     if ref_to_pred_floor.active_cell_count > 0:
         ref_to_pred_hough = run_probabilistic_hough_and_filter(
             score_matrix=ref_to_pred_matrix,
@@ -844,6 +892,8 @@ def run_alpha_candidate(
             prediction_windows=prediction_windows,
             reference_window_count=ref_to_pred_shape[0],
             minimum_raw_line_nls=candidate_config.min_surviving_line_nls,
+            hough_num_runs=hough.hough_num_runs,
+            window_overlap=window_overlap,
         )
     else:
         ref_to_pred_hough = empty_hough_payload(score_floor_result=ref_to_pred_floor)
@@ -854,6 +904,7 @@ def run_alpha_candidate(
         prediction_windows=prediction_windows,
         reference_window_count=ref_to_pred_shape[0],
         minimum_line_nls=None,
+        window_overlap=window_overlap,
     )
 
     if line_filter_result.filtered_result.get("lines_used") and ref_to_ref_floor.active_cell_count > 0:
@@ -966,7 +1017,7 @@ def build_alpha_sweep_pickle_payload(
             "hough_threshold": int(hough.hough_threshold),
             "hough_line_length": int(hough.hough_line_length),
             "hough_line_gap": int(hough.hough_line_gap),
-            "hough_seed": int(hough.hough_seed),
+            "hough_seed": None if hough.hough_seed is None else int(hough.hough_seed),
             "align_min_iou_threshold": float(config.align_min_iou_threshold),
             "min_surviving_line_nls": config.min_surviving_line_nls,
         },
@@ -1273,7 +1324,7 @@ def process_one_document(
         else:
             log(f"[plot] {document.fname} payload skipped reason=plotting_disabled")
 
-        if bool(config.alpha_sweep_enabled) and not fixed_minimum_levenshtein_mask_enabled(config):
+        if bool(config.alpha_sweep_enabled) and not fixed_minimum_levenshtein_mask_enabled(config) and not bool(config.suppress_output_files):
             pickle_payload = build_alpha_sweep_pickle_payload(
                 document=document,
                 config=config,
@@ -1288,6 +1339,8 @@ def process_one_document(
             )
             write_pickle_atomically(Path(alpha_sweep_pickle_path), pickle_payload)
             log(f"[alpha-sweep] {document.fname} wrote pickle {alpha_sweep_pickle_path}")
+        elif bool(config.suppress_output_files):
+            log(f"[alpha-sweep] {document.fname} pickle suppressed; suppress_output_files=True")
 
         if fixed_minimum_levenshtein_mask_enabled(config):
             log(

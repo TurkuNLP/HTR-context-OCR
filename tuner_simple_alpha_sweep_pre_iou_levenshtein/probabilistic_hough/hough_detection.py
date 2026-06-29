@@ -88,10 +88,12 @@ def detect_falling_diagonal_hough_lines(
     hough_threshold: int,
     hough_line_length: int,
     hough_line_gap: int,
-    hough_seed: int,
+    hough_seed: int | None,
 ) -> dict:
     """Run scikit-image Hough and keep only falling diagonal segments."""
     hough_image = hough_context.get("hough_image", hough_context["mask"])
+    # When hough_seed is None, omit rng entirely so skimage uses its own PCG64 generator.
+    rng_kwargs: dict = {} if hough_seed is None else {"rng": np.random.default_rng(int(hough_seed))}
     raw_segments_from_skimage = list(
         probabilistic_hough_line(
             hough_image,
@@ -99,7 +101,7 @@ def detect_falling_diagonal_hough_lines(
             line_length=int(hough_line_length),
             line_gap=int(hough_line_gap),
             theta=FALLING_DIAGONAL_NORMAL_THETA_RADIANS,
-            rng=np.random.default_rng(int(hough_seed)),
+            **rng_kwargs,
         )
     )
 
@@ -246,6 +248,58 @@ def filter_lines_by_column_ownership(
     }
 
 
+def collect_multi_seed_hough_segments(
+    *,
+    hough_context: dict,
+    hough_threshold: int,
+    hough_line_length: int,
+    hough_line_gap: int,
+    hough_seed: int | None,
+    hough_num_runs: int,
+) -> tuple[list[tuple[tuple[float, float], tuple[float, float]]], dict]:
+    """Run Hough hough_num_runs times and return the deduplicated union of falling segments.
+
+    When hough_seed is None each run omits the rng argument, letting skimage's PCG64
+    generator vary naturally between calls.  When hough_seed is an integer run i uses
+    seed hough_seed+i so the full ensemble is deterministic and reproducible.
+    """
+    # When seed is None: each call omits rng → skimage's own PCG64 randomness per run.
+    # When seed is int: derive run-specific seeds arithmetically for reproducibility.
+    seeds: list[int | None] = (
+        [None] * int(hough_num_runs)
+        if hough_seed is None
+        else [int(hough_seed) + i for i in range(int(hough_num_runs))]
+    )
+    union: set[tuple[tuple[float, float], tuple[float, float]]] = set()
+    per_run_counts: list[int] = []
+    # Maps each unique segment to the number of individual runs that detected it.
+    segment_hit_counts: dict[tuple[tuple[float, float], tuple[float, float]], int] = {}
+    total_skimage_raw = 0
+    total_direction_rejected = 0
+    for run_seed in seeds:
+        run_result = detect_falling_diagonal_hough_lines(
+            hough_context=hough_context,
+            hough_threshold=int(hough_threshold),
+            hough_line_length=int(hough_line_length),
+            hough_line_gap=int(hough_line_gap),
+            hough_seed=run_seed,
+        )
+        run_segments: list[tuple[tuple[float, float], tuple[float, float]]] = run_result["raw_lines"]
+        per_run_counts.append(int(len(run_segments)))
+        total_skimage_raw += int(run_result["skimage_raw_line_count_before_direction_filter"])
+        total_direction_rejected += int(run_result["direction_rejected_line_count"])
+        for seg in run_segments:
+            segment_hit_counts[seg] = segment_hit_counts.get(seg, 0) + 1
+        union.update(run_segments)
+    union_sorted: list[tuple[tuple[float, float], tuple[float, float]]] = sorted(union)
+    return union_sorted, {
+        "per_run_counts": per_run_counts,
+        "segment_hit_counts": segment_hit_counts,
+        "total_skimage_raw": total_skimage_raw,
+        "total_direction_rejected": total_direction_rejected,
+    }
+
+
 def run_probabilistic_hough_and_filter(
     *,
     score_matrix: np.ndarray,
@@ -254,24 +308,58 @@ def run_probabilistic_hough_and_filter(
     hough_threshold: int,
     hough_line_length: int,
     hough_line_gap: int,
-    hough_seed: int,
+    hough_seed: int | None,
     align_min_iou_threshold: float,
     reference_windows: Sequence[str] | None = None,
     prediction_windows: Sequence[str] | None = None,
     reference_window_count: int | None = None,
     minimum_raw_line_nls: float | None = None,
+    hough_num_runs: int = 1,
+    window_overlap: int = 0,
 ) -> HoughFilteredPayload:
-    """Run local Hough detection and v2.2 true-IoU filtering once."""
+    """Run local Hough detection and v2.2 true-IoU filtering.
+
+    When hough_num_runs > 1, detection is repeated that many times using the same
+    mask and parameters but different seeds; the union of all raw segments is
+    assembled before the pre-IoU Levenshtein filter and IoU filter run once on
+    the combined result.
+    """
     hough_context = build_simple_hough_context(hough_input_mask=hough_input_mask, score_floor=float(score_floor))
 
     detect_started_at = time.perf_counter()
-    detection_result = detect_falling_diagonal_hough_lines(
-        hough_context=hough_context,
-        hough_threshold=int(hough_threshold),
-        hough_line_length=int(hough_line_length),
-        hough_line_gap=int(hough_line_gap),
-        hough_seed=int(hough_seed),
-    )
+    if int(hough_num_runs) > 1:
+        union_segments, run_info = collect_multi_seed_hough_segments(
+            hough_context=hough_context,
+            hough_threshold=int(hough_threshold),
+            hough_line_length=int(hough_line_length),
+            hough_line_gap=int(hough_line_gap),
+            hough_seed=hough_seed,
+            hough_num_runs=int(hough_num_runs),
+        )
+        detection_result: dict = {
+            "threshold_start": float(hough_context.get("threshold_start", float("nan"))),
+            "mask": hough_context["hough_image"],
+            "mask_bool": hough_context.get("hough_mask_bool"),
+            "raw_lines": union_segments,
+            "candidate_segments": list(union_segments),
+            "hough_num_runs": int(hough_num_runs),
+            "hough_per_run_raw_counts": run_info["per_run_counts"],
+            "hough_segment_run_hit_counts": run_info["segment_hit_counts"],
+            "skimage_raw_line_count_before_direction_filter": run_info["total_skimage_raw"],
+            "direction_rejected_line_count": run_info["total_direction_rejected"],
+            "hough_union_unique_segment_count": int(len(union_segments)),
+        }
+    else:
+        detection_result = detect_falling_diagonal_hough_lines(
+            hough_context=hough_context,
+            hough_threshold=int(hough_threshold),
+            hough_line_length=int(hough_line_length),
+            hough_line_gap=int(hough_line_gap),
+            hough_seed=hough_seed,
+        )
+        detection_result["hough_num_runs"] = 1
+        detection_result["hough_per_run_raw_counts"] = [int(len(detection_result["raw_lines"]))]
+        detection_result["hough_union_unique_segment_count"] = int(len(detection_result["raw_lines"]))
     detect_seconds = time.perf_counter() - detect_started_at
 
     original_falling_segments = list(detection_result.get("raw_lines", []))
@@ -283,6 +371,7 @@ def run_probabilistic_hough_and_filter(
             prediction_windows=prediction_windows,
             reference_window_count=int(reference_window_count if reference_window_count is not None else np.asarray(score_matrix).shape[0]),
             minimum_line_nls=minimum_raw_line_nls,
+            window_overlap=int(window_overlap),
         )
         detection_result = dict(detection_result)
         detection_result["raw_lines_before_pre_iou_levenshtein"] = original_falling_segments
@@ -340,6 +429,7 @@ __all__ = [
     "FALLING_DIAGONAL_MIN_VISUAL_ANGLE_DEGREES",
     "HoughFilteredPayload",
     "assign_columns_to_candidate_lines_with_python_reference",
+    "collect_multi_seed_hough_segments",
     "empty_column_assignment",
     "filter_lines_by_column_ownership",
     "run_probabilistic_hough_and_filter",

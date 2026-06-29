@@ -26,10 +26,14 @@ VALID_PLOT_MODES = {
 #   coverage-hallucination-only   NLS excluded entirely; selection driven by coverage and
 #                                 non-hallucination only.
 #                                 Formula: 2 / (1/coverage + 1/(1-hallucination))
+#
+#   nls-priority                  Double weight on NLS vs. coverage and non-hallucination.
+#                                 Formula: 4 / (2/NLS + 1/coverage + 1/(1-hallucination))
 VALID_HARMONIC_MODES = {
     "balanced",
     "coverage-hallucination-priority",
     "coverage-hallucination-only",
+    "nls-priority",
 }
 
 
@@ -100,6 +104,11 @@ class PipelineConfig:
     # The harmonic mode controls which formula is used to score each alpha candidate during selection.
     # See VALID_HARMONIC_MODES for the full list of accepted values and their formulas.
     alpha_selection_harmonic_mode: str = "balanced"
+    # When True, all disk writes are suppressed: no output directory is created, no CSV or JSON
+    # files are written, no per-document PKL pickles are written, and no plots are rendered.
+    # All scoring results are still computed and logged to stdout.  Useful when the pipeline
+    # is called programmatically and the caller reads results directly from the return value.
+    suppress_output_files: bool = False
 
     def validate(self) -> "PipelineConfig":
         """Return this object after validating settings that can be checked locally."""

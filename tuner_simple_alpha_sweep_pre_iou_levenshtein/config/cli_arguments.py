@@ -50,7 +50,16 @@ def build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--hough-threshold", type=int, default=25)
     parser.add_argument("--hough-line-length", type=int, default=35)
     parser.add_argument("--hough-line-gap", type=int, default=15)
-    parser.add_argument("--hough-seed", type=int, default=1)
+    parser.add_argument("--hough-seed", type=int, default=None,
+        help="Integer seed for probabilistic Hough. When omitted, skimage's own PCG64 generator is used (non-deterministic).")
+    parser.add_argument("--hough-num-runs", type=int, default=1,
+        help=(
+            "Number of independent ref-to-pred Hough runs per alpha candidate. "
+            "Each run uses the same mask and parameters but a different seed; "
+            "the union of all detected segments feeds the downstream filter. "
+            "Default 1 preserves the original single-run behaviour."
+        )
+    )
     parser.add_argument("--align-min-iou-threshold", type=float, default=0.035)
     parser.add_argument("--min-surviving-line-nls", type=float, default=0.5)
     parser.add_argument("--plot-mode", choices=sorted(VALID_PLOT_MODES), default="stitched-language")
@@ -63,6 +72,18 @@ def build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--result-bucket-size", type=int, default=20)
     parser.add_argument("--result-bucket-seconds", type=float, default=60.0)
     parser.add_argument(
+        "--suppress-output-files",
+        action="store_true",
+        default=False,
+        help=(
+            "When set, no files or directories are written to --output-dir. "
+            "The pipeline runs entirely in memory: no CSVs, no per-document PKL pickles, "
+            "no plots, and no output directory creation. "
+            "All scoring results are still computed and logged to stdout. "
+            "Implies --plot-mode none."
+        ),
+    )
+    parser.add_argument(
         "--harmonic-mode",
         choices=sorted(VALID_HARMONIC_MODES),
         default="balanced",
@@ -71,6 +92,7 @@ def build_argument_parser() -> argparse.ArgumentParser:
             "'balanced' applies equal weight to NLS, coverage, and non-hallucination (default). "
             "'coverage-hallucination-priority' doubles the weight on coverage and non-hallucination. "
             "'coverage-hallucination-only' excludes NLS and selects on coverage and non-hallucination alone. "
+            "'nls-priority' doubles the weight on NLS text similarity vs. coverage and non-hallucination. "
             "A subdirectory named after the chosen mode is automatically created inside --output-dir."
         ),
     )
@@ -85,9 +107,13 @@ def parse_pipeline_config(argv: list[str] | None = None) -> PipelineConfig:
     document_types = tuple() if args.all_document_types else tuple(args.document_types or ())
     min_line_nls = None if args.min_surviving_line_nls is None or args.min_surviving_line_nls <= 0.0 else float(args.min_surviving_line_nls)
     harmonic_mode = str(args.harmonic_mode)
-    # Results from each harmonic mode are written to a dedicated subdirectory so that runs with
-    # different modes can share the same parent --output-dir without overwriting each other.
-    output_dir = Path(args.output_dir) / harmonic_mode
+    # The harmonic-mode subdirectory is only meaningful during alpha sweep, where the formula
+    # determines which candidate is selected. When --minimum-pre-hough-levenshtein is set there
+    # is exactly one candidate and no selection, so results go directly into --output-dir.
+    if args.minimum_pre_hough_levenshtein is None:
+        output_dir = Path(args.output_dir) / harmonic_mode
+    else:
+        output_dir = Path(args.output_dir)
     config = PipelineConfig(
         runfile_json=Path(args.runfile_json),
         output_dir=output_dir,
@@ -111,7 +137,8 @@ def parse_pipeline_config(argv: list[str] | None = None) -> PipelineConfig:
             hough_threshold=int(args.hough_threshold),
             hough_line_length=int(args.hough_line_length),
             hough_line_gap=int(args.hough_line_gap),
-            hough_seed=int(args.hough_seed),
+            hough_seed=None if args.hough_seed is None else int(args.hough_seed),
+            hough_num_runs=int(args.hough_num_runs),
         ),
         align_min_iou_threshold=float(args.align_min_iou_threshold),
         min_surviving_line_nls=min_line_nls,
@@ -125,6 +152,7 @@ def parse_pipeline_config(argv: list[str] | None = None) -> PipelineConfig:
         result_bucket_size=int(args.result_bucket_size),
         result_bucket_seconds=float(args.result_bucket_seconds),
         alpha_selection_harmonic_mode=harmonic_mode,
+        suppress_output_files=bool(args.suppress_output_files),
     )
     return config.validate()
 

@@ -115,12 +115,54 @@ def euclidean_line_length(line_record: dict) -> float:
     return float(computed_length)
 
 
-def join_text_windows_without_separators(windows: Sequence[str], indices: Sequence[int]) -> str:
-    """Concatenate valid text windows in the exact order used by v2.2 line scoring."""
+def join_text_windows_without_separators(
+    windows: Sequence[str],
+    indices: Sequence[int],
+    *,
+    window_overlap: int = 0,
+) -> str:
+    """Concatenate valid text windows, deducting the shared overlap between consecutive windows.
+
+    When window_overlap > 0 and two adjacent index values are strictly consecutive
+    (index_n == index_{n-1} + 1), the sliding window that produced them shares
+    window_overlap characters with its predecessor.  Naively joining both windows
+    in full would count those characters twice and inflate NLS scores.  This
+    function strips the first window_overlap characters from each window that
+    immediately follows a consecutive predecessor so every source character appears
+    exactly once in the concatenated result.
+
+    Non-consecutive index pairs (a gap in the diagonal path) always contribute
+    their full window text because there is no shared prefix to remove.
+    """
     # Store the valid window count once so each index check is cheap and explicit.
     window_count = len(windows)
-    # Join with an empty separator because sliding windows are already slices of contiguous source text.
-    return "".join(str(windows[int(index)]) for index in indices if 0 <= int(index) < int(window_count))
+
+    if window_overlap <= 0:
+        # Fast exit: no overlap stripping needed, behave identically to the original join.
+        return "".join(
+            str(windows[int(index)])
+            for index in indices
+            if 0 <= int(index) < int(window_count)
+        )
+
+    text_parts: list[str] = []
+    previous_window_index: int | None = None
+    for index in indices:
+        window_index = int(index)
+        if not (0 <= window_index < int(window_count)):
+            # Skip out-of-range indices just as the original implementation did.
+            continue
+        window_text = str(windows[window_index])
+        if previous_window_index is not None and window_index == previous_window_index + 1:
+            # This window directly follows the previous one in the original text source.
+            # Strip the leading overlap characters that were already included in the
+            # previous window to avoid counting the shared region twice.
+            text_parts.append(window_text[window_overlap:])
+        else:
+            # First window, or a non-consecutive gap: include the full window text.
+            text_parts.append(window_text)
+        previous_window_index = window_index
+    return "".join(text_parts)
 
 
 def ordered_unique(values: Sequence[int]) -> list[int]:
@@ -210,6 +252,7 @@ def compute_line_text_record(
     reference_windows: Sequence[str],
     prediction_windows: Sequence[str],
     reference_window_count: int,
+    window_overlap: int = 0,
 ) -> LineTextRecord | None:
     """Compute one line's v2.2-compatible text similarity from the windows it owns."""
     # Identify the prediction columns owned by this final line after true-IoU filtering.
@@ -230,10 +273,15 @@ def compute_line_text_record(
     if not reference_rows_for_line:
         return None
 
-    # Concatenate prediction windows without separator because the windows are overlapping text slices.
-    prediction_line_text = join_text_windows_without_separators(prediction_windows, owned_prediction_columns)
-    # Concatenate mapped reference windows using the same no-separator rule as v2.2.
-    reference_line_text = join_text_windows_without_separators(reference_windows, reference_rows_for_line)
+    # Concatenate prediction windows, stripping the shared overlap prefix from each
+    # consecutive pair so that characters shared between adjacent windows are counted once.
+    prediction_line_text = join_text_windows_without_separators(
+        prediction_windows, owned_prediction_columns, window_overlap=int(window_overlap)
+    )
+    # Apply the same overlap-aware concatenation to reference windows.
+    reference_line_text = join_text_windows_without_separators(
+        reference_windows, reference_rows_for_line, window_overlap=int(window_overlap)
+    )
     # Compute the normalized Levenshtein similarity for this line using tuner_simple's RapidFuzz implementation.
     line_score = float(normalized_levenshtein_similarity(prediction_line_text, reference_line_text))
     # Read or compute the geometric length used by v2.2 as the weighted along-line averaging weight.
@@ -260,6 +308,7 @@ def compute_line_text_records(
     reference_windows: Sequence[str],
     prediction_windows: Sequence[str],
     reference_window_count: int,
+    window_overlap: int = 0,
 ) -> list[LineTextRecord]:
     """Compute v2.2-compatible text-similarity records for all current final lines."""
     # Store scored records in final-line order.
@@ -274,6 +323,7 @@ def compute_line_text_records(
             reference_windows=reference_windows,
             prediction_windows=prediction_windows,
             reference_window_count=int(reference_window_count),
+            window_overlap=int(window_overlap),
         )
         # Keep only lines that have both prediction text, reference text, and positive geometry.
         if record is not None:
@@ -381,6 +431,7 @@ def filter_lines_by_minimum_normalised_levenshtein(
     prediction_windows: Sequence[str],
     reference_window_count: int,
     minimum_line_nls: float | None,
+    window_overlap: int = 0,
 ) -> LineTextFilterResult:
     """Remove final lines whose v2.2-compatible line-level text similarity is too low."""
     # Mark the beginning of line-text filtering for timing output.
@@ -401,6 +452,7 @@ def filter_lines_by_minimum_normalised_levenshtein(
         reference_windows=reference_windows,
         prediction_windows=prediction_windows,
         reference_window_count=int(reference_window_count),
+        window_overlap=int(window_overlap),
     )
     # Store line scores by their original line id for quick filter decisions.
     record_by_line_id = {int(record.line_id): record for record in line_records}
@@ -470,6 +522,7 @@ def compute_weighted_along_lines_from_payload(
     prediction_windows: Sequence[str],
     lines_used: list[dict],
     compact_payload: dict,
+    window_overlap: int = 0,
 ) -> WeightedAlongLinesResult:
     """Compute weighted along-line similarity from final lines and ownership arrays."""
     # Read the assignment dictionary from the local compact payload.
@@ -483,6 +536,7 @@ def compute_weighted_along_lines_from_payload(
         reference_windows=reference_windows,
         prediction_windows=prediction_windows,
         reference_window_count=int(reference_window_count),
+        window_overlap=int(window_overlap),
     )
     # Convert records into the v2.2-compatible weighted along-lines score.
     return weighted_result_from_records(records)

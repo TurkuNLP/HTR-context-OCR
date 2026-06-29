@@ -4,10 +4,30 @@ from __future__ import annotations
 
 import csv
 import shutil
+import sys
 import time
 from collections import defaultdict
 from pathlib import Path
 from typing import Any, Mapping
+
+
+def _raise_csv_field_size_limit() -> None:
+    """Allow very large CSV fields (full document text / serialised metrics).
+
+    Worker progress rows can hold fields well past Python's default 131072-byte
+    limit, so raise it to the largest value this platform's C long accepts.
+    """
+
+    limit = sys.maxsize
+    while True:
+        try:
+            csv.field_size_limit(limit)
+            return
+        except OverflowError:
+            limit = int(limit // 10)
+
+
+_raise_csv_field_size_limit()
 
 from tuner_simple_alpha_sweep_pre_iou_levenshtein.plotting.stitched_language_panels import save_stitched_language_image
 from tuner_simple_alpha_sweep_pre_iou_levenshtein.results_writing.flat_csv_tables import write_all_flat_outputs

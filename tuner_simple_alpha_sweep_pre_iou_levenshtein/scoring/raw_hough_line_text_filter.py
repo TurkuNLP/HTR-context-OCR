@@ -78,8 +78,15 @@ def filter_raw_hough_segments_by_line_levenshtein(
     prediction_windows: Sequence[str],
     reference_window_count: int,
     minimum_line_nls: float | None,
+    window_overlap: int = 0,
 ) -> RawHoughLineTextFilterResult:
-    """Remove raw falling Hough segments whose own text similarity is too weak."""
+    """Remove raw falling Hough segments whose own text similarity is too weak.
+
+    window_overlap must equal max(0, window_size - window_stride).  When it is
+    positive the concatenation of consecutive windows strips the shared prefix
+    so that the overlapping characters are counted exactly once in both the
+    prediction and reference text strings passed to Levenshtein.
+    """
 
     started_at = time.perf_counter()
     matrix = np.asarray(score_matrix, dtype=float)
@@ -165,10 +172,38 @@ def filter_raw_hough_segments_by_line_levenshtein(
                                 seen.add(ri)
                                 unique_rows.append(ri)
                     if unique_rows:
-                        pred_text = "".join(
-                            str(prediction_windows[c]) for c in range(col_start, col_end + 1)
-                        )
-                        ref_text = "".join(str(reference_windows[r]) for r in unique_rows)
+                        # Prediction columns span a strictly consecutive range, so the
+                        # overlap-aware concatenation simply takes the full first window
+                        # and strips window_overlap leading characters from every subsequent
+                        # window to avoid counting the shared suffix/prefix twice.
+                        if window_overlap > 0 and col_end > col_start:
+                            pred_text = str(prediction_windows[col_start]) + "".join(
+                                str(prediction_windows[pred_col])[window_overlap:]
+                                for pred_col in range(col_start + 1, col_end + 1)
+                            )
+                        else:
+                            pred_text = "".join(
+                                str(prediction_windows[pred_col])
+                                for pred_col in range(col_start, col_end + 1)
+                            )
+                        # Reference rows may contain gaps along the diagonal, so we only
+                        # strip the overlap prefix when two adjacent rows are strictly
+                        # consecutive — sharing exactly window_overlap characters in the
+                        # original source text.  Non-consecutive rows (a gap on the
+                        # diagonal) always contribute their full window text.
+                        if window_overlap > 0 and len(unique_rows) > 1:
+                            ref_text_parts: list[str] = []
+                            previous_ref_row: int | None = None
+                            for ref_row in unique_rows:
+                                ref_window_text = str(reference_windows[ref_row])
+                                if previous_ref_row is not None and ref_row == previous_ref_row + 1:
+                                    ref_text_parts.append(ref_window_text[window_overlap:])
+                                else:
+                                    ref_text_parts.append(ref_window_text)
+                                previous_ref_row = ref_row
+                            ref_text = "".join(ref_text_parts)
+                        else:
+                            ref_text = "".join(str(reference_windows[ref_row]) for ref_row in unique_rows)
                         raw_nls = float(normalized_levenshtein_similarity(pred_text, ref_text))
                         if math.isfinite(raw_nls):
                             line_score = max(0.0, min(1.0, raw_nls))
@@ -192,6 +227,7 @@ def filter_raw_hough_segments_by_line_levenshtein(
                     reference_windows=reference_windows,
                     prediction_windows=prediction_windows,
                     reference_window_count=int(reference_window_count),
+                    window_overlap=int(window_overlap),
                 )
                 if text_record is not None:
                     line_score = float(text_record.normalized_levenshtein_similarity)

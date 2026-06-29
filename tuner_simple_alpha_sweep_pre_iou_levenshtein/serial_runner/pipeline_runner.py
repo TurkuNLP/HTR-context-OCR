@@ -22,8 +22,10 @@ def run_simple_tuner(config: PipelineConfig, *, log) -> dict[str, Any]:
     run_started_at = time.perf_counter()
     # Compute or store output_dir so later code can reuse this named value clearly.
     output_dir = Path(config.output_dir)
-    # Ensure the target directory exists before later code tries to write files into it.
-    output_dir.mkdir(parents=True, exist_ok=True)
+    # Only create the output directory when file output is not suppressed.
+    # When suppress_output_files is True the run is entirely in-memory and no directory is needed.
+    if not bool(config.suppress_output_files):
+        output_dir.mkdir(parents=True, exist_ok=True)
 
     # Write a progress message so long runs are understandable from terminal or Slurm output.
     log("[run] simple serial tuner started")
@@ -69,7 +71,8 @@ def run_simple_tuner(config: PipelineConfig, *, log) -> dict[str, Any]:
         f"[config] hough threshold={int(config.hough_parameters.hough_threshold)} "
         f"line_length={int(config.hough_parameters.hough_line_length)} "
         f"line_gap={int(config.hough_parameters.hough_line_gap)} "
-        f"seed={int(config.hough_parameters.hough_seed)} "
+        f"seed={'random' if config.hough_parameters.hough_seed is None else int(config.hough_parameters.hough_seed)} "
+        f"num_runs={int(config.hough_parameters.hough_num_runs)} "
         f"align_min_iou_threshold={float(config.align_min_iou_threshold):.6f} "
         f"min_surviving_line_nls={config.min_surviving_line_nls}"
     )
@@ -132,19 +135,22 @@ def run_simple_tuner(config: PipelineConfig, *, log) -> dict[str, Any]:
     # Write a progress message so long runs are understandable from terminal or Slurm output.
     log(f"[matrix-index] build done seconds={time.perf_counter() - index_started_at:.6f}")
 
+    # Plotting is active only when the user requested it AND output suppression is not engaged.
+    # suppress_output_files=True overrides any plot_mode setting and skips all rendering.
+    plotting_is_active = (config.plot_mode != "none") and not bool(config.suppress_output_files)
+
     # Compute or store plotter so later code can reuse this named value clearly.
     plotter = None
-    # Check whether config.plot_mode != "none"; the indented block handles that specific case.
-    if config.plot_mode != "none":
+    if plotting_is_active:
         from tuner_simple_alpha_sweep_pre_iou_levenshtein.plotting.stitched_language_panels import SimplePlotManager
 
         # Compute or store plotter so later code can reuse this named value clearly.
         plotter = SimplePlotManager(config=config, log=log)
         # Write a progress message so long runs are understandable from terminal or Slurm output.
         log(f"[plot] plot mode enabled: {config.plot_mode}")
-    # Define the else field so this data object records that value explicitly.
+    elif bool(config.suppress_output_files):
+        log("[plot] plot mode disabled; suppress_output_files=True overrides plot_mode setting")
     else:
-        # Write a progress message so long runs are understandable from terminal or Slurm output.
         log("[plot] plot mode disabled; plotting libraries will not be imported")
 
     # Compute or store result_rows: list[dict[str, Any]] so later code can reuse this named value clearly.
@@ -273,7 +279,8 @@ def run_simple_tuner(config: PipelineConfig, *, log) -> dict[str, Any]:
         # Add the hough_line_gap field to the surrounding dictionary so it appears in outputs or returned metadata.
         "hough_line_gap": int(config.hough_parameters.hough_line_gap),
         # Add the hough_seed field to the surrounding dictionary so it appears in outputs or returned metadata.
-        "hough_seed": int(config.hough_parameters.hough_seed),
+        "hough_seed": None if config.hough_parameters.hough_seed is None else int(config.hough_parameters.hough_seed),
+        "hough_num_runs": int(config.hough_parameters.hough_num_runs),
         # Add the minimum_matrix_rows field to the surrounding dictionary so it appears in outputs or returned metadata.
         "minimum_matrix_rows": int(config.minimum_matrix_rows),
         # Add the minimum_matrix_columns field to the surrounding dictionary so it appears in outputs or returned metadata.
@@ -290,37 +297,28 @@ def run_simple_tuner(config: PipelineConfig, *, log) -> dict[str, Any]:
         "stitched_plot_paths": stitched_plot_paths,
     }
 
-    # Compute or store output_started_at so later code can reuse this named value clearly.
-    output_started_at = time.perf_counter()
-    # Write a progress message so long runs are understandable from terminal or Slurm output.
-    log("[output] flat files write start")
-    # Compute or store output_paths so later code can reuse this named value clearly.
-    output_paths = write_all_flat_outputs(
-        # Pass output_dir into the surrounding call; this supplies the directory where CSV, JSON, and optional plot files will be written.
-        output_dir=output_dir,
-        # Pass the runfile_rows argument into the surrounding call so the callee receives that setting explicitly.
-        runfile_rows=runfile_rows,
-        # Pass the loadable_rows argument into the surrounding call so the callee receives that setting explicitly.
-        loadable_rows=loadable_rows,
-        # Pass the loaded_rows argument into the surrounding call so the callee receives that setting explicitly.
-        loaded_rows=loaded_rows,
-        # Pass the skipped_rows argument into the surrounding call so the callee receives that setting explicitly.
-        skipped_rows=skipped_rows,
-        # Pass the result_rows argument into the surrounding call so the callee receives that setting explicitly.
-        result_rows=result_rows,
-        # Pass the run_summary argument into the surrounding call so the callee receives that setting explicitly.
-        run_summary=run_summary,
-    )
-    # Write a progress message so long runs are understandable from terminal or Slurm output.
-    log(f"[output] flat files write done file_count={len(output_paths)} seconds={time.perf_counter() - output_started_at:.6f}")
-    # Write a progress message so long runs are understandable from terminal or Slurm output.
+    # Write CSV, JSON, and any stitched-plot manifest files only when output suppression is off.
+    # When suppress_output_files is True, skip all disk writes and return an empty output-paths map.
+    output_paths: dict[str, str] = {}
+    if not bool(config.suppress_output_files):
+        output_started_at = time.perf_counter()
+        log("[output] flat files write start")
+        output_paths = write_all_flat_outputs(
+            output_dir=output_dir,
+            runfile_rows=runfile_rows,
+            loadable_rows=loadable_rows,
+            loaded_rows=loaded_rows,
+            skipped_rows=skipped_rows,
+            result_rows=result_rows,
+            run_summary=run_summary,
+        )
+        log(f"[output] flat files write done file_count={len(output_paths)} seconds={time.perf_counter() - output_started_at:.6f}")
+        for label, path in sorted(output_paths.items()):
+            log(f"[output] {label}: {path}")
+    else:
+        log("[output] flat files suppressed; suppress_output_files=True — no CSV or JSON written")
     log(f"[run] finished in {elapsed_seconds:.3f} seconds")
-    # Write a progress message so long runs are understandable from terminal or Slurm output.
     log(f"[run] processed={len(result_rows)} skipped={len(skipped_rows)}")
-    # Iterate over label, path in sorted(output_paths.items()) so each item is processed with the same logic.
-    for label, path in sorted(output_paths.items()):
-        # Write a progress message so long runs are understandable from terminal or Slurm output.
-        log(f"[output] {label}: {path}")
     # Return this computed value to the caller so the next pipeline stage can use it.
     return {"run_summary": run_summary, "output_paths": output_paths}
 
